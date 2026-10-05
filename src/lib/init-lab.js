@@ -17,7 +17,7 @@ function val(id) { return Number($(id).value); }
 function outputs() { for (const id of ["threshold", "offsetX", "offsetY", "gradientEnd", "brushSize", ...config.map(c => c[0])]) $(id + "Out").textContent = $(id).value; }
 function newPaper() {
   engine.new_paper(); count = 0;
-  $("empty").hidden = false; $("count").textContent = "0 IMPRESSIONS";
+  $("empty").hidden = false; $("count").textContent = "0回";
   $("status").textContent = "新しい紙をセットしました"; render();
 }
 function render() {
@@ -29,7 +29,15 @@ function makePlate() {
   for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
     const i = y * M + x, p = i * 4;
     const gray = .2126 * img.data[p] + .7152 * img.data[p+1] + .0722 * img.data[p+2];
-    const black = gray < val("threshold"); mask[i] = ($("invert").checked ? !black : black) ? 1 : 0;
+    const component = ({red: img.data[p], green: img.data[p+1], blue: img.data[p+2]})[$("separation").value] ?? gray;
+    let density = clamp((255 - component) / 255 * val("threshold") / 128);
+    if ($("invert").checked) density = 1 - density;
+    const cell = 8;
+    const dx = (x % cell + 0.5) / cell - 0.5, dy = (y % cell + 0.5) / cell - 0.5;
+    // Area of circular dots encodes tone; highlights remain clear and shadows become solid.
+    mask[i] = $("plateMode").value === "binary"
+      ? (($("invert").checked ? component >= val("threshold") : component < val("threshold")) ? 1 : 0)
+      : (density >= 0.98 || Math.PI * (dx * dx + dy * dy) < density ? 1 : 0);
 
   }
   new Float32Array(engine.memory.buffer, engine.mask_ptr(), M * M).set(mask);
@@ -41,18 +49,18 @@ function sample() {
   sx.font = "bold 118px serif"; sx.textAlign = "center"; sx.fillText("活版", 256, 225);
   sx.font = "bold 62px serif"; sx.fillText("実験室", 256, 320);
   sx.font = "18px serif"; sx.fillText("INK · PAPER · PRESS", 256, 384);
-  sx.fillRect(118, 415, 276, 5); makePlate();
+  sx.fillRect(118, 415, 276, 5); engine.clear_ink(); makePlate();
 }
 const mode = () => ({uniform: 0, gradient: 1, paint: 2})[$("inkMode").value];
 const rgb = () => parseInt($("color").value.slice(1), 16);
 function imprint() {
-  const start = performance.now();
+
   engine.print(val("pressure") / 100, val("roughness") / 100, val("speed") / 100, val("viscosity") / 100, val("ink") / 100, mode(), val("gradientEnd") / 100, val("gradientAngle"), val("direction"), val("offsetX"), val("offsetY"), rgb());
-  const ms = (performance.now() - start).toFixed(1);
+
   count = engine.impression_count(); showPlate(); render();
-  $("empty").hidden = true; $("count").textContent = count + " IMPRESSIONS";
+  $("empty").hidden = true; $("count").textContent = count + "回";
   $("status").textContent = count + "回目の刷り。インクは湿っています。";
-  $("timing").textContent = "Rust計算: " + ms + " ms";
+
 }
 listen($("print"), "click", async () => {
   if (printing) return; printing = true; $("print").disabled = true;
@@ -68,6 +76,7 @@ listen($("dry"), "click", () => {
   $("status").textContent = "インクを乾かしました。次の色は独立した層として重なります。"; render();
 });
 listen($("download"), "click", () => { const a = document.createElement("a"); a.download = "letterpress-" + count + ".png"; a.href = paper.toDataURL("image/png"); a.click(); });
+listen($("separation"), "change", makePlate); listen($("plateMode"), "change", makePlate);
 listen($("threshold"), "input", makePlate); listen($("invert"), "change", makePlate);
 listen($("sample"), "click", () => { $("invert").checked = false; $("threshold").value = 150; outputs(); sample(); });
 root.querySelectorAll("input[type=range]").forEach(el => listen(el, "input", outputs));
@@ -82,22 +91,57 @@ listen($("upload"), "change", async event => {
     const scale = Math.min((M - 32) / img.width, (M - 32) / img.height);
     sx.fillStyle = "white"; sx.fillRect(0, 0, M, M);
     sx.drawImage(img, (M-img.width*scale)/2, (M-img.height*scale)/2, img.width*scale, img.height*scale);
-    makePlate(); $("status").textContent = "画像から版を作りました。黒い部分が印刷されます。";
+    engine.clear_ink(); makePlate(); $("status").textContent = "画像を単色用の版に変換しました。版にインクを塗ってください。";
   } catch { $("status").textContent = "画像を読み込めませんでした。PNGやJPEGをお試しください。"; }
   finally { URL.revokeObjectURL(url); }
 });
 function showPlate() {
   engine.update_plate(mode(), val("ink") / 100, val("gradientEnd") / 100, val("gradientAngle"), rgb());
   const bytes = new Uint8ClampedArray(engine.memory.buffer, engine.plate_ptr(), M * M * 4).slice();
-  plate.getContext("2d").putImageData(new ImageData(bytes, M, M), 0, 0);
+  const context = plate.getContext("2d");
+  context.fillStyle = "#ada79a"; context.fillRect(0, 0, N, N);
+  context.putImageData(new ImageData(bytes, M, M), 64, 64);
+  $("colorOut").textContent = $("color").value.toUpperCase();
 }
+let saturation=0.734, brightness=0.737;
+function hsv(h,s,v) {
+  const f=n=>{const k=(n+h/60)%6;return Math.round((v-v*s*Math.max(0,Math.min(k,4-k,1)))*255);};
+  return "#"+[f(5),f(3),f(1)].map(n=>n.toString(16).padStart(2,"0")).join("");
+}
+function drawPicker() {
+  const canvas=$("colorPalette"), context=canvas.getContext("2d"), h=val("colorHue");
+  context.fillStyle=hsv(h,1,1); context.fillRect(0,0,canvas.width,canvas.height);
+  const white=context.createLinearGradient(0,0,canvas.width,0);white.addColorStop(0,"white");white.addColorStop(1,"transparent");
+  context.fillStyle=white;context.fillRect(0,0,canvas.width,canvas.height);
+  const black=context.createLinearGradient(0,0,0,canvas.height);black.addColorStop(0,"transparent");black.addColorStop(1,"black");
+  context.fillStyle=black;context.fillRect(0,0,canvas.width,canvas.height);
+  context.beginPath();context.arc(saturation*canvas.width,(1-brightness)*canvas.height,5,0,Math.PI*2);context.strokeStyle="white";context.lineWidth=2;context.stroke();
+}
+function pickColor() {$("color").value=hsv(val("colorHue"),saturation,brightness);drawPicker();showPlate();}
+let picking=false;
+function paletteEvent(e) {const box=$("colorPalette").getBoundingClientRect();saturation=clamp((e.clientX-box.left)/box.width);brightness=1-clamp((e.clientY-box.top)/box.height);pickColor();}
+listen($("colorPalette"),"pointerdown",e=>{picking=true;$("colorPalette").setPointerCapture(e.pointerId);paletteEvent(e);});
+listen($("colorPalette"),"pointermove",e=>{if(picking)paletteEvent(e);});
+for(const event of ["pointerup","pointercancel","lostpointercapture"])listen($("colorPalette"),event,()=>{picking=false;});
+listen($("colorPalette"),"keydown",e=>{if(!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key))return;e.preventDefault();saturation=clamp(saturation+(e.key==="ArrowRight"?.02:e.key==="ArrowLeft"?-.02:0));brightness=clamp(brightness+(e.key==="ArrowUp"?.02:e.key==="ArrowDown"?-.02:0));pickColor();});
+listen($("colorHue"),"input",pickColor);
+listen($("color"),"input",()=>{
+  const hex=rgb(), r=(hex>>16&255)/255,g=(hex>>8&255)/255,b=(hex&255)/255;
+  const max=Math.max(r,g,b),min=Math.min(r,g,b),delta=max-min;
+  brightness=max;saturation=max===0?0:delta/max;
+  if(delta>0)$("colorHue").value=((max===r?(g-b)/delta:max===g?(b-r)/delta+2:(r-g)/delta+4)*60+360)%360;
+  drawPicker();
+});
+drawPicker();
 function paintAt(x, y) {
-  engine.paint_ink(x, y, val("brushSize"), val("ink") / 100, $("eraseInk").checked ? 1 : 0);
+  engine.paint_ink(x, y, val("brushSize"), val("ink") / 100, $("eraseInk").checked ? 1 : 0, rgb());
 }
 let dragging=false, previous=null, cursor={x:256,y:256};
 function paintEvent(e) {
   const box=plate.getBoundingClientRect();
-  const pos={x:clamp(M-1-(e.clientX-box.left)/box.width*M,0,M-1),y:clamp((e.clientY-box.top)/box.height*M,0,M-1)};
+  const displayX=(e.clientX-box.left)/box.width*N-64, displayY=(e.clientY-box.top)/box.height*N-64;
+  if (displayX<0 || displayY<0 || displayX>=M || displayY>=M) {previous=null; return;}
+  const pos={x:M-1-displayX,y:displayY};
   if(previous){const steps=Math.ceil(Math.hypot(pos.x-previous.x,pos.y-previous.y)/Math.max(4,val("brushSize")/3));for(let k=1;k<=steps;k++)paintAt(previous.x+(pos.x-previous.x)*k/steps,previous.y+(pos.y-previous.y)*k/steps);}else paintAt(pos.x,pos.y);
   previous=pos;cursor=pos;showPlate();
 }
@@ -109,8 +153,10 @@ listen($("inkMode"), "change",()=>{$("gradientControls").hidden=$("inkMode").val
 listen($("clearInk"), "click",()=>{engine.clear_ink();showPlate();});
 for(const id of ["ink","gradientEnd","gradientAngle","color"])listen($(id), "input", showPlate);
 root.querySelectorAll("[data-color]").forEach(el=>listen(el, "click",showPlate));
-outputs(); sample(); newPaper();
+engine.clear_ink(); outputs(); sample(); newPaper();
+$("gradientControls").hidden=$("inkMode").value!=="gradient";
+$("paintControls").hidden=$("inkMode").value!=="paint";
 $("print").disabled = false;
-$("engineStatus").textContent = "Rust / WebAssembly · READY";
+$("status").textContent = "版をドラッグしてインクを塗ってください。";
 return () => abort.abort();
 }

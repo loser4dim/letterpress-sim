@@ -10,7 +10,7 @@ export type PrintEngine = {
   new_paper(): void;
   dry_ink(): void;
   clear_ink(): void;
-  paint_ink(x: number, y: number, radius: number, strength: number, erase: number): void;
+  paint_ink(x: number, y: number, radius: number, strength: number, erase: number, rgb: number): void;
   update_plate(mode: number, amount: number, end: number, angle: number, rgb: number): void;
   print(pressure: number, roughness: number, speed: number, viscosity: number, amount: number, mode: number, end: number, gradientAngle: number, peelAngle: number, offsetX: number, offsetY: number, rgb: number): void;
   impression_count(): number;

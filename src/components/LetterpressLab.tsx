@@ -2,9 +2,9 @@
 import { useEffect, useRef } from "react";
 import { loadEngine } from "../lib/wasm";
 import { initLab } from "../lib/init-lab";
-const controls: [string, string, number][] = [["ink", "インクの量", 55], ["pressure", "押す圧", 55], ["roughness", "紙の粗さ", 55], ["speed", "剥がす速度", 40], ["viscosity", "インクの粘度", 60]];
-function Range({ id, label, value }: { id: string; label: string; value: number }) {
-  return <label>{label}<output id={id + "Out"}>{value}</output><input id={id} type="range" min="0" max="100" defaultValue={value} /></label>;
+
+function Range({ id, label, value, max = 100, min = 0 }: { id: string; label: string; value: number; max?: number; min?: number }) {
+  return <label>{label}<output id={id + "Out"}>{value}</output><input id={id} type="range" min={min} max={max} defaultValue={value} /></label>;
 }
 export default function LetterpressLab() {
   const root = useRef<HTMLDivElement>(null);
@@ -15,11 +15,50 @@ export default function LetterpressLab() {
       if (!stopped && root.current) cleanup = initLab(root.current, engine);
     }).catch(error => {
       if (stopped || !root.current) return;
-      const status = root.current.querySelector("#engineStatus");
-      if (status) status.textContent = "エンジンを読み込めませんでした。ページを再読み込みしてください。";
+      const status = root.current.querySelector("#status");
+      if (status) status.textContent = "読み込みに失敗しました。ページを再読み込みしてください。";
       console.error(error);
     });
     return () => { stopped = true; cleanup?.(); };
   }, []);
-  return <div ref={root}><header><a className="brand" href="#">活版実験室<span>LETTERPRESS LAB / 01</span></a><span className="tag">NEXT.JS × RUST</span></header><main><section className="intro"><p className="eyebrow">小さな版から、偶然の一枚。</p><h1>組む。重ねる。<br />刷りを、探る。</h1><p>画像を凸版にして、紙とインクの出会いを試す。<br />圧、紙目、剥がし方が、一枚の表情を変えます。</p></section><div className="workspace"><aside><section><h2><b>01</b> 版をつくる</h2><label className="upload">画像を選ぶ<input id="upload" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" /></label><p className="hint">黒い部分がインクを受ける凸部になります。画像は端末内で処理します。</p><label>二値化のしきい値 <output id="thresholdOut"></output><input id="threshold" type="range" min="0" max="255" defaultValue="150" /></label><label className="check"><input id="invert" type="checkbox" /> 白黒を反転</label><button id="sample" className="quiet">サンプルの版に戻す</button><label>インクの乗せ方<select id="inkMode"><option value="uniform">一定量</option><option value="gradient">量のグラデーション</option><option value="paint">手塗り（版をドラッグ）</option></select></label><div id="gradientControls" hidden><label>グラデーションの終点量 <output id="gradientEndOut"></output><input id="gradientEnd" type="range" min="0" max="100" defaultValue="10" /></label><label>グラデーションの向き<select id="gradientAngle"><option value="0">左 → 右（刷り上がり）</option><option value="90">上 → 下</option><option value="45">左上 → 右下</option></select></label></div><div id="paintControls" hidden><label>ローラー幅 <output id="brushSizeOut"></output><input id="brushSize" type="range" min="8" max="120" defaultValue="45" /></label><label className="check"><input id="eraseInk" type="checkbox" /> インクを拭き取る</label><button id="clearInk" className="quiet">インクを全部拭く</button><p className="hint">版をなぞってインクを重ねます。現在のインク量が一回の塗布量になります。</p></div><div className="plate"><canvas id="plate" tabIndex={0} aria-label="鏡像の版。手塗りモードではドラッグでインクを塗布。キーボードでは矢印で位置を移動、スペースで塗布" width="512" height="512"></canvas><span>鏡像の版面 / 黒 = 凸部</span></div></section><section><h2><b>02</b> 刷りを調整</h2><div className="colors"><label>インク色<input type="color" id="color" defaultValue="#bc3d32" /></label><button className="swatch red" data-color="#bc3d32" aria-label="朱色"></button><button className="swatch blue" data-color="#254b76" aria-label="藍色"></button><button className="swatch black" data-color="#282521" aria-label="墨色"></button></div>{controls.map(([id, label, value]) => <Range key={id} id={id} label={label} value={value} />)}<label>剥がす方向<select id="direction"><option value="0">左から右</option><option value="90">上から下</option><option value="45">左上から右下</option></select></label><div className="offsets"><label>横の位置 <output id="offsetXOut"></output><input id="offsetX" type="range" min="-100" max="100" defaultValue="0" /></label><label>縦の位置 <output id="offsetYOut"></output><input id="offsetY" type="range" min="-100" max="100" defaultValue="0" /></label></div></section></aside><article className="print-area"><div className="paper-head"><div><p className="eyebrow">PRINTING TABLE</p><h2>試し刷り</h2></div><span id="count">0 IMPRESSIONS</span></div><div className="board"><canvas id="paper" width="640" height="640" aria-label="試し刷り結果"></canvas><div id="empty">右下の「刷る」で、最初の一枚を。</div></div><div className="actions"><button id="clear" className="quiet">新しい紙</button><button id="dry" className="quiet">インクを乾かす</button><button disabled id="print" className="primary">版を押して、刷る <span>↗</span></button></div><div className="engine-info"><span id="engineStatus" role="status">Rustエンジンを読み込み中…</span><span id="timing">計算時間を表示します</span></div><div className="status"><span id="status" role="status">紙をセットしました</span><button id="download" className="link">PNGを保存 ↓</button></div><details><summary>この実験室の仕組み</summary><p>画面はNext.js / React、計算エンジンはRustからコンパイルしたWebAssemblyです。紙の凹凸・版の傷・インク膜厚を格子で保持し、接触率と剥離時の転移率からインク量を計算します。乾いた層は光学濃度を重ね、湿った層は局所的にインクを移動させます。色はRGBから作った光学濃度の近似で、顔料の分光モデルではありません。物理現象を参考にした簡略モデルで、実機の印刷結果を予測するものではありません。</p><p>紙の粗さは次に刷る際の接触状態に作用します。一定量とグラデーションでは毎回インクを補充し、手塗りでは転移した分が版から減ります。剥離速度の効果や色は調整用の仮定で、物性の実測には対応していません。</p><a href="https://www.jstage.jst.go.jp/article/nig1958/24/1/24_1_41/_article/-char/en" target="_blank" rel="noopener">参考：Studies on Printing Ink Transfer (1986)</a></details></article></div><footer>LETTERPRESS LAB <span>画像からつくるのは、仮想の凸版。手の違いを、一枚の違いに。</span></footer></main></div>;
+  return <div ref={root}>
+    <header><a className="brand" href="#">活版実験室</a></header>
+    <main>
+      <section className="stage" aria-labelledby="plate-title">
+        <div className="stage-heading"><h1 id="plate-title">版をつくる・インクを塗る</h1><span>01</span></div>
+        <div className="stage-content">
+          <aside>
+            <label className="upload">画像を選ぶ<input id="upload" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" /></label>
+            <label>カラー画像の変換<select id="separation" defaultValue="luminance"><option value="luminance">明るさから版を作る</option><option value="red">赤成分から版を作る</option><option value="green">緑成分から版を作る</option><option value="blue">青成分から版を作る</option></select></label>
+            <label>版の作り方<select id="plateMode" defaultValue="halftone"><option value="halftone">網点（写真・グラデーション）</option><option value="binary">二値化（文字・線画）</option></select></label>
+            <Range id="threshold" label="版の濃さ・二値化のしきい値" value={150} max={255} />
+            <label className="check"><input id="invert" type="checkbox" /> 白黒を反転</label>
+            <button id="sample" className="quiet">サンプルの版に戻す</button>
+            <p className="hint">画像を単色用の凸版に変換します。カラー画像の元の色は印刷されません。</p>
+            <div className="color-picker"><label htmlFor="color">塗るインクの色</label><canvas id="colorPalette" width="280" height="180" tabIndex={0} aria-label="色の明るさと鮮やかさ。矢印キーでも調整できます" /><label className="hue-label">色相<input id="colorHue" type="range" min="0" max="360" defaultValue="5" /></label><input type="color" id="color" defaultValue="#bc3d32" /><output id="colorOut">#BC3D32</output></div>
+            <Range id="ink" label="一回に塗るインク量" value={35} />
+            <label>塗り方<select id="inkMode" defaultValue="paint"><option value="paint">手塗り</option><option value="uniform">全面に一定量</option><option value="gradient">量のグラデーション</option></select></label>
+            <div id="paintControls"><Range id="brushSize" label="ローラーの半径" value={45} max={120} /><label className="check"><input id="eraseInk" type="checkbox" /> インクを拭き取る</label><button id="clearInk" className="quiet">インクを全部拭く</button><p className="hint">版をドラッグして塗布。同じ場所を重ね塗りすると厚くなります。色を変えると次の塗布から変わります。</p></div>
+            <div id="gradientControls" hidden><Range id="gradientEnd" label="グラデーションの終点量" value={10} /><label>向き<select id="gradientAngle"><option value="0">左 → 右（刷り上がり）</option><option value="90">上 → 下</option><option value="45">左上 → 右下</option></select></label></div>
+          </aside>
+          <div className="canvas-area"><div className="board plate-board"><canvas id="plate" tabIndex={0} aria-label="鏡像の版。ドラッグで塗布。矢印で位置を移動し、スペースで塗布" width="640" height="640" /></div><p className="canvas-caption">鏡像の版面 · 暗い金属が凸部 / 色が付いた部分がインク</p></div>
+        </div>
+      </section>
+      <section className="stage" aria-labelledby="print-title">
+        <div className="stage-heading"><h2 id="print-title">刷る</h2><span id="count">0回</span></div>
+        <div className="stage-content">
+          <aside>
+            <Range id="pressure" label="押す圧" value={55} /><Range id="roughness" label="紙の粗さ" value={55} /><Range id="speed" label="剥がす速度" value={40} /><Range id="viscosity" label="インクの粘度" value={60} />
+            <p className="hint">厚塗りほど版の縁にはみ出します。低い粘度では紙ににじみ、高速の剥離では小さな飛沫が出ます。</p>
+            <label>剥がす方向<select id="direction"><option value="0">左から右</option><option value="90">上から下</option><option value="45">左上から右下</option></select></label>
+            <Range id="offsetX" label="横の位置" value={0} min={-100} max={100} /><Range id="offsetY" label="縦の位置" value={0} min={-100} max={100} />
+            <div className="actions"><button disabled id="print" className="primary">版を押して、刷る</button><button id="clear" className="quiet">新しい紙</button><button id="dry" className="quiet">インクを乾かす</button><button id="download" className="quiet">PNGを保存</button></div>
+            <p id="status" className="status" role="status">読み込み中…</p>
+          </aside>
+          <div className="canvas-area"><div className="board"><canvas id="paper" width="640" height="640" aria-label="試し刷り結果" /><div id="empty">版にインクを塗り、「刷る」を押してください</div></div><p className="canvas-caption">刷り上がり</p></div>
+        </div>
+      </section>
+      <footer><a href="https://www.jstage.jst.go.jp/article/nig1958/24/1/24_1_41/_article/-char/en" target="_blank" rel="noopener">参考文献：Studies on Printing Ink Transfer (1986)</a></footer>
+    </main>
+  </div>;
 }
