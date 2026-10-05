@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 
@@ -32,6 +32,20 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup target add wasm32-unknown-unknown
+
+      - name: Test Rust
+        run: cargo test --manifest-path rust/Cargo.toml
+
+      - name: Build WebAssembly
+        run: pnpm build:wasm
+
+      - name: Test WebAssembly
+        run: pnpm test:wasm
 
       - name: Check ESLint
         run: pnpm exec eslint .

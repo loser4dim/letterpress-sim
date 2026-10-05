@@ -1,25 +1,42 @@
 export type PrintEngine = {
-  memory: WebAssembly.Memory;
-  engine_init(): void;
-  mask_ptr(): number;
-  coating_ptr(): number;
-  image_ptr(): number;
-  plate_ptr(): number;
-  wet_ptr(): number;
-  dry_ptr(): number;
-  new_paper(): void;
-  dry_ink(): void;
-  clear_ink(): void;
-  paint_ink(x: number, y: number, radius: number, strength: number, erase: number, rgb: number): void;
-  update_plate(mode: number, amount: number, end: number, angle: number, rgb: number): void;
-  print(pressure: number, roughness: number, speed: number, viscosity: number, amount: number, mode: number, end: number, gradientAngle: number, peelAngle: number, offsetX: number, offsetY: number, rgb: number): void;
-  impression_count(): number;
+  sizes: { simulation: number; source: number; output: number };
+  call(method: string, args?: unknown[], transfer?: Transferable[], progress?: (percent: number) => void): Promise<unknown>;
+  dispose(): void;
 };
 export async function loadEngine(): Promise<PrintEngine> {
-  const response = await fetch(`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/wasm/letterpress_engine.wasm`);
-  if (!response.ok) throw new Error(`Rust engine: HTTP ${response.status}`);
-  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {});
-  const engine = instance.exports as unknown as PrintEngine;
-  engine.engine_init();
-  return engine;
+  const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+  const worker = new Worker(`${base}/wasm/engine-worker.js`);
+  let sequence = 0;
+  const pending = new Map<number, {
+    resolve(value: unknown): void;
+    reject(reason: Error): void;
+    progress?: (percent: number) => void;
+  }>();
+  let disposed = false;
+  function fail(error: Error) {
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
+  }
+  worker.onmessage = event => {
+    const { id, result, error, progress } = event.data;
+    const request = pending.get(id);
+    if (!request) return;
+    if (progress !== undefined) { request.progress?.(progress); return; }
+    pending.delete(id);
+    if (error) request.reject(new Error(error)); else request.resolve(result);
+  };
+  worker.onerror = event => { disposed = true; worker.terminate(); fail(new Error(event.message || "計算処理が停止しました")); };
+  function call(method: string, args: unknown[] = [], transfer: Transferable[] = [], progress?: (percent: number) => void): Promise<unknown> {
+    if (disposed) return Promise.reject(new Error("計算処理は終了しています"));
+    return new Promise((resolve, reject) => {
+      const id = ++sequence;
+      pending.set(id, { resolve, reject, progress });
+      worker.postMessage({ id, method, args }, transfer);
+    });
+  }
+  const dispose = () => { disposed = true; worker.terminate(); fail(new Error("処理を終了しました")); };
+  try {
+    const sizes = await call("initialize", [`${base}/wasm/letterpress_engine.wasm`]) as PrintEngine["sizes"];
+    return { sizes, call, dispose };
+  } catch (error) { dispose(); throw error; }
 }

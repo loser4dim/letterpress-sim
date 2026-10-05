@@ -1,48 +1,71 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { Worker } from "node:worker_threads";
 import assert from "node:assert/strict";
-const {instance}=await WebAssembly.instantiate(readFileSync("public/wasm/letterpress_engine.wasm"),{});
-const e=instance.exports;
-const N=640,M=512,S=N*N;
-const float=(ptr,len)=>new Float32Array(e.memory.buffer,ptr,len);
-const sum=a=>a.reduce((x,y)=>x+y,0);
-const ink=()=>float(e.wet_ptr(),S*3);
-const coat=()=>float(e.coating_ptr(),M*M);
-const pixels=()=>new Uint8Array(e.memory.buffer,e.image_ptr(),S*4).slice();
-function print(p=.7,mode=0,rgb=0xbc3d32,ox=0) {e.print(p,.55,.4,.6,.55,mode,.1,0,0,ox,0,rgb);}
-e.engine_init();float(e.mask_ptr(),M*M).fill(1);
-const blank=pixels();print(0);assert.equal(sum(ink()),0);assert.deepEqual(pixels(),blank);
-print();assert(sum(ink())>0);assert.equal(e.impression_count(),2);assert(ink().every(v=>Number.isFinite(v)&&v>=0));
-const printed=pixels();e.dry_ink();assert.equal(sum(ink()),0);assert(sum(float(e.dry_ptr(),S*3))>0);assert.deepEqual(pixels(),printed);
-print(.7,0,0x254b76,20);assert.notDeepEqual(pixels(),printed);assert.equal(e.impression_count(),3);
-e.new_paper();e.clear_ink();print(.7,2);assert.equal(sum(ink()),0);
-e.paint_ink(256,256,45,.55,0,0xbc3d32);assert(coat()[256*M+256]>0);const before=sum(coat());print(.7,2);assert(sum(coat())<before);assert(sum(ink())>0);
-e.update_plate(1,.8,.1,0,0xbc3d32);let plate=new Uint8Array(e.memory.buffer,e.plate_ptr(),M*M*4);assert(plate[(256*M+511)*4]>plate[(256*M)*4]);
-// Excess ink spreads beyond the plate, while zero-pressure remains unchanged.
-e.engine_init();float(e.mask_ptr(),M*M).fill(0);float(e.mask_ptr(),M*M)[256*M+256]=1;
-for(let n=0;n<40;n++)e.paint_ink(256,256,5,1,0,0xbc3d32);
-e.print(1,0,.9,0,1,2,.1,0,0,0,0,0xbc3d32);
-assert(ink()[(320*N+326)*3]>0,"heavy ink must spread beyond the one-pixel plate");
-assert(ink().every(v=>Number.isFinite(v)&&v>=0));
-// Different painted colors survive a picker change and print independently.
-e.engine_init();float(e.mask_ptr(),M*M).fill(1);
-e.paint_ink(150,256,20,1,0,0xff0000);e.paint_ink(350,256,20,1,0,0x0000ff);
-e.print(1,0,0,1,1,2,.1,0,0,0,0,0x00ff00);
-const left=(320*N+214)*3,right=(320*N+414)*3;
-assert(ink()[left]<ink()[left+2]);assert(ink()[right]>ink()[right+2]);
-// Full browser controller wiring against real WebAssembly, without a browser rasterizer.
-const { initLab } = await import("../src/lib/init-lab.js");
-class Element extends EventTarget {
-  constructor(id){super();this.id=id;this.value=({threshold:150,offsetX:0,offsetY:0,gradientEnd:10,brushSize:45,direction:0,gradientAngle:0,inkMode:"paint",plateMode:"binary",separation:"luminance",color:"#bc3d32",ink:55,pressure:55,roughness:55,speed:40,viscosity:60})[id]??"";this.checked=false;this.hidden=false;this.classList={remove(){},add(){}};this.width=this.height=512;}
-  getContext(){return raster;} getBoundingClientRect(){return {left:0,top:0,width:512,height:512};}setPointerCapture(){} click(){this.dispatchEvent(new Event("click"));}toDataURL(){return "data:";}
+
+const { instance } = await WebAssembly.instantiate(readFileSync("public/wasm/letterpress_engine.wasm"), {});
+const e = instance.exports;
+e.engine_init();
+assert.equal(e.simulation_size(), 8192);
+assert.equal(e.output_size(), 4096);
+const M = e.source_size();
+assert.equal(M, 6552);
+const source = () => new Uint8Array(e.memory.buffer, e.source_ptr(), M * M);
+const coat = () => new Float32Array(e.memory.buffer, e.coating_ptr(), 512 * 512);
+e.configure_plate(1, 150, 0);
+for (let y = M / 2 - 10; y < M / 2 + 10; y++) source().fill(0, y * M + M / 2 - 10, y * M + M / 2 + 10);
+function print(pressure, mode = 0, rgb = 0xbc3d32, viscosity = 0.6) {
+  e.print_begin(pressure, .55, .4, viscosity, .55, mode, .1, 0, 0, 0, 0, rgb);
+  e.print_rows(M / 2 - 16, 32); e.print_finish();
 }
-const raster={createLinearGradient(){return {addColorStop(){}};},beginPath(){},arc(){},stroke(){},fillRect(){},fillText(){},strokeRect(){},createImageData(w,h){return {data:new Uint8ClampedArray(w*h*4)};},getImageData(x,y,w,h){return {data:new Uint8ClampedArray(w*h*4)};},putImageData(){}};
-const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,new Element(id));return elements.get(id);};
-const root={querySelector:s=>get(s.slice(1)),querySelectorAll:()=>[]};
-globalThis.document={createElement:()=>new Element("")};globalThis.ImageData=class{constructor(data,w,h){this.data=data;this.width=w;this.height=h;}};
-const cleanup=initLab(root,e);assert.equal(get("print").disabled,false);assert.match(get("status").textContent,/ドラッグ/);
-e.paint_ink(256,256,45,.8,0,0xbc3d32); get("print").click();await new Promise(r=>setTimeout(r,340));assert.equal(e.impression_count(),1);assert(sum(ink())>0);
-get("dry").click();assert.equal(sum(ink()),0);get("clear").click();assert.equal(e.impression_count(),0);
-get("inkMode").value="paint";get("inkMode").dispatchEvent(new Event("change"));assert.equal(get("paintControls").hidden,false);
-get("clearInk").click();assert.equal(sum(coat()),0);
-cleanup();get("dry").click();assert.equal(sum(float(e.dry_ptr(),S*3)),0);
-console.log("PASS: actual Rust WASM transfer, zero pressure, drying, overprint, hand-coating depletion, mirror-gradient, DOM controller, listener cleanup");
+print(0); assert.equal(e.wet_total(), 0); assert.equal(e.allocated_tiles(), 0);
+print(.7); assert(e.wet_total() > 0); assert(e.allocated_tiles() < 32);
+e.render_preview(); const printed = new Uint8Array(e.memory.buffer, e.image_ptr(), 640 ** 2 * 4).slice();
+e.dry_ink(); assert.equal(e.wet_total(), 0); e.render_preview();
+assert.deepEqual(new Uint8Array(e.memory.buffer, e.image_ptr(), 640 ** 2 * 4), printed);
+e.new_paper(); e.clear_ink(); print(.7, 2); assert.equal(e.wet_total(), 0);
+e.paint_ink(256, 256, 45, .8, 0, 0xbc3d32);
+const before = coat().reduce((a, b) => a + b, 0);
+print(.7, 2, 0x0000ff); assert(e.wet_total() > 0); assert(coat().reduce((a, b) => a + b, 0) < before);
+for (let i = 0; i < 40; i++) e.paint_ink(256, 256, 45, 1, 0, 0xbc3d32);
+e.new_paper(); print(1, 2, 0xbc3d32, 0); assert(e.allocated_tiles() > 1);
+e.render_export();
+const exported = new Uint8Array(e.memory.buffer, e.export_ptr(), 4096 ** 2 * 4);
+assert.equal(exported.length, 67108864); assert.equal(exported[3], 255); assert.equal(exported.at(-1), 255);
+
+// Run the actual browser worker code in a separate Node thread with its Web APIs adapted.
+const worker = new Worker(`
+const { parentPort, workerData } = require("node:worker_threads");
+const fs = require("node:fs");
+globalThis.self = globalThis;
+self.postMessage = (value, transfer) => parentPort.postMessage(value, transfer);
+globalThis.fetch = async () => new Response(fs.readFileSync(workerData.wasm));
+parentPort.on("message", data => self.onmessage({ data }));
+require("node:vm").runInThisContext(fs.readFileSync(workerData.script, "utf8"));
+`, { eval: true, workerData: { wasm: resolve("public/wasm/letterpress_engine.wasm"), script: resolve("public/wasm/engine-worker.js") } });
+let sequence = 0;
+const pending = new Map();
+worker.on("message", message => {
+  const request = pending.get(message.id); if (!request) return;
+  if (message.progress !== undefined) { request.progress.push(message.progress); return; }
+  pending.delete(message.id);
+  if (message.error) request.reject(new Error(message.error)); else request.resolve({ result: message.result, progress: request.progress });
+});
+worker.on("error", error => { for (const request of pending.values()) request.reject(error); pending.clear(); });
+function call(method, args = [], transfer = []) {
+  return new Promise((resolve, reject) => { const id = ++sequence; pending.set(id, { resolve, reject, progress: [] }); worker.postMessage({ id, method, args }, transfer); });
+}
+try {
+  const init = await call("initialize", ["test.wasm"]);
+  assert.equal(init.result.simulation, 8192); assert.equal(init.result.output, 4096);
+  await call("configure", [1, 150, 0]);
+  const mask = new Uint8Array(M * M).fill(255);
+  for (let y = M / 2 - 10; y < M / 2 + 10; y++) mask.fill(0, y * M + M / 2 - 10, y * M + M / 2 + 10);
+  await call("source", [mask], [mask.buffer]); assert.equal(mask.byteLength, 0);
+  await call("paint", [[[256, 256]], 45, .8, 0, 0xbc3d32]);
+  const print = await call("print", [.7, .55, .4, .6, .55, 2, .1, 0, 0, 0, 0, 0xbc3d32]);
+  assert.equal(print.result, 1); assert.equal(print.progress.at(-1), 100);
+  assert.equal((await call("preview")).result.length, 640 ** 2 * 4);
+  assert.equal((await call("plate", [2, .55, .1, 0, 0xbc3d32])).result.length, 512 ** 2 * 4);
+} finally { await worker.terminate(); }
+console.log("PASS: actual 8192-grid WASM, sparse allocation, 4096 export, pressure, drying, ink depletion, excess ink, and real worker messaging/progress");

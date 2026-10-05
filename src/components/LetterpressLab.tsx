@@ -13,6 +13,7 @@ export default function LetterpressLab() {
     let cleanup: (() => void) | undefined;
     loadEngine().then(engine => {
       if (!stopped && root.current) cleanup = initLab(root.current, engine);
+      else engine.dispose();
     }).catch(error => {
       if (stopped || !root.current) return;
       const status = root.current.querySelector("#status");
@@ -52,7 +53,7 @@ export default function LetterpressLab() {
             <p className="hint">厚塗りほど版の縁にはみ出します。低い粘度では紙ににじみ、高速の剥離では小さな飛沫が出ます。</p>
             <label>剥がす方向<select id="direction"><option value="0">左から右</option><option value="90">上から下</option><option value="45">左上から右下</option></select></label>
             <Range id="offsetX" label="横の位置" value={0} min={-100} max={100} /><Range id="offsetY" label="縦の位置" value={0} min={-100} max={100} />
-            <div className="actions"><button disabled id="print" className="primary">版を押して、刷る</button><button id="clear" className="quiet">新しい紙</button><button id="dry" className="quiet">インクを乾かす</button><button id="download" className="quiet">PNGを保存</button></div>
+            <div className="actions"><button disabled id="print" className="primary">版を押して、刷る</button><button id="clear" className="quiet">新しい紙</button><button id="dry" className="quiet">インクを乾かす</button><button id="download" className="quiet">4K PNGを保存</button></div>
             <p id="status" className="status" role="status">読み込み中…</p>
           </aside>
           <div className="canvas-area"><div className="board"><canvas id="paper" width="640" height="640" aria-label="試し刷り結果" /><div id="empty">版にインクを塗り、「刷る」を押してください</div></div><p className="canvas-caption">刷り上がり</p></div>
