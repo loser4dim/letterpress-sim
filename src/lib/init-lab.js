@@ -2,7 +2,7 @@ export function initLab(root, engine) {
 const abort = new AbortController();
 const listen = (el, event, callback) => el.addEventListener(event, callback, { signal: abort.signal });
 const $ = (id) => root.querySelector("#" + id);
-const N = 640, M = 512, SIZE = N * N;
+const N = 640, M = 512;
 const paper = $("paper"), ctx = paper.getContext("2d"), plate = $("plate");
 const source = document.createElement("canvas"); source.width = source.height = M;
 const sx = source.getContext("2d", {willReadFrequently: true});
@@ -25,7 +25,7 @@ function render() {
   ctx.putImageData(new ImageData(bytes, N, N), 0, 0);
 }
 function makePlate() {
-  const img = sx.getImageData(0, 0, M, M), out = plate.getContext("2d").createImageData(M, M);
+  const img = sx.getImageData(0, 0, M, M);
   for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
     const i = y * M + x, p = i * 4;
     const gray = .2126 * img.data[p] + .7152 * img.data[p+1] + .0722 * img.data[p+2];
