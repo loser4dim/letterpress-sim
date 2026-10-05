@@ -2,6 +2,7 @@ export function initLab(root, engine) {
   const abort = new AbortController();
   const $ = id => root.querySelector("#" + id);
   const N = 640, M = 512, SOURCE = engine.sizes.source;
+  $("resolution").value = String(engine.sizes.simulation);
   const paper = $("paper"), plate = $("plate");
   const ctx = paper.getContext("2d");
   const source = document.createElement("canvas");
@@ -19,6 +20,12 @@ export function initLab(root, engine) {
     try { Promise.resolve(callback(e)).catch(error => { if (!abort.signal.aborted) failure(error); }); }
     catch (error) { failure(error); }
   }, { signal: abort.signal });
+  listen($("restartResolution"), "click", () => {
+    if (busy) return;
+    const url = new URL(location.href);
+    url.searchParams.set("resolution", $("resolution").value);
+    location.assign(url.href);
+  });
   function lock(value) {
     busy = value;
     root.querySelectorAll("input, select, button").forEach(element => { element.disabled = value; });
@@ -105,7 +112,8 @@ export function initLab(root, engine) {
   }));
   listen($("download"), "click", () => action(async () => {
     status("保存する画像を作っています…");
-    const bytes = await engine.call("export");
+    const transparent = $("transparentExport").checked;
+    const bytes = await engine.call("export", [transparent]);
     if (abort.signal.aborted) return;
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = engine.sizes.output;
@@ -115,7 +123,7 @@ export function initLab(root, engine) {
     if (!blob) throw new Error("PNGを作成できませんでした");
     if (abort.signal.aborted) return;
     const url = URL.createObjectURL(blob), a = document.createElement("a");
-    a.download = "letterpress-" + count + "-4096.png"; a.href = url; a.click();
+    a.download = "letterpress-" + count + (transparent ? "-ink" : "") + "-4096.png"; a.href = url; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000); status("画像を保存しました。");
   }));
   listen($("separation"), "change", () => action(async () => { status("画像から版を作っています…"); await uploadSource(); status("版を更新しました。"); }));

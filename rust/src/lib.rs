@@ -1,4 +1,4 @@
-//! 8192² sparse paper grid; 4096² export is averaged from four simulated cells.
+//! Selectable 4096²/8192² sparse paper grid; output is always 4096².
 //! Plate coating uses a bilinear 512² field. Paper stores quantized optical density.
 use std::ptr;
 const SIM: usize = 8192;
@@ -47,6 +47,18 @@ struct Params {
     ox: i32,
     oy: i32,
     rgb: u32,
+}
+// Phenomenological transfer curve: contact coverage, finite paper acceptance,
+// then splitting of the remaining film. Structure follows printing transfer
+// literature; coefficients are dimensionless and NOT fitted material properties.
+fn transferred_film(film: f32, coverage: f32, capacity: f32, split: f32) -> f32 {
+    if film <= 0. || coverage <= 0. {
+        return 0.;
+    }
+    let b = capacity.max(0.0001);
+    // Weibull-type acceptance, bounded by both the available film and capacity.
+    let fixed = (b * (1. - (-(film / b).powf(1.4)).exp())).min(film);
+    coverage.clamp(0., 1.) * (fixed + split.clamp(0., 1.) * (film - fixed))
 }
 impl Engine {
     fn new(n: usize) -> Self {
@@ -276,10 +288,14 @@ impl Engine {
                 let roller = 0.84
                     + 0.12 * (px as f32 / scale * 0.025 + py as f32 / scale * 0.006).sin()
                     + 0.06 * hash(px as i32 / 4, py as i32 / 4, self.count + 79);
-                let split = (0.85 - 0.28 * p.speed * p.visc
-                    + 0.10 * p.speed * ((lx * a.cos() + ly * a.sin()) * 0.17 + grain * 4.).sin())
-                .clamp(0.15, 0.95);
-                let mass = (local * 1.35 * contact * split * roller).min(local * 1.35);
+                let film = local * 1.35;
+                let split = (0.5 / (1. + 0.6 * p.speed + 0.15 * film)).clamp(0.15, 0.5);
+                let capacity = 0.16 * (0.4 + 0.6 * p.rough) / (0.4 + p.visc);
+                // 0.125 is the illustrative film scale for reaching broad coverage;
+                // it is not a measured micrometre thickness.
+                let coverage =
+                    contact * (1. - (-(film / 0.125 * (1. + p.pressure * 3.)).powi(2)).exp());
+                let mass = transferred_film(film, coverage, capacity, split) * roller.min(1.);
                 if mass <= 0. {
                     continue;
                 }
@@ -415,6 +431,52 @@ impl Engine {
             self.image = bytes
         }
     }
+    fn ink_rgba(&self, x: usize, y: usize) -> [f32; 4] {
+        let p = self.pixel(x, y);
+        let density = [0, 1, 2].map(|c| (p.wet[c] as f32 + p.dry[c] as f32) / OD_SCALE);
+        let maximum = density.iter().copied().fold(0., f32::max);
+        if maximum == 0. {
+            return [0.; 4];
+        }
+        // Optical-density filter represented as RGBA over white. Premultiplied RGB
+        // allows averaging without beige paper fringes at thin/antialiased edges.
+        let transmission_min = (-maximum).exp();
+        [
+            (-density[0]).exp() - transmission_min,
+            (-density[1]).exp() - transmission_min,
+            (-density[2]).exp() - transmission_min,
+            1. - transmission_min,
+        ]
+    }
+    fn render_transparent(&mut self, size: usize) {
+        let mut bytes = std::mem::take(&mut self.export);
+        bytes.resize(size * size * 4, 0);
+        let factor = self.n as f32 / size as f32;
+        for y in 0..size {
+            for x in 0..size {
+                let mut sum = [0.; 4];
+                for (fx, fy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                    let rgba = self.ink_rgba(
+                        ((x as f32 + fx) * factor).floor().min((self.n - 1) as f32) as usize,
+                        ((y as f32 + fy) * factor).floor().min((self.n - 1) as f32) as usize,
+                    );
+                    for c in 0..4 {
+                        sum[c] += rgba[c] * 0.25;
+                    }
+                }
+                let k = (y * size + x) * 4;
+                for c in 0..3 {
+                    bytes[k + c] = if sum[3] > 0. {
+                        (sum[c] / sum[3] * 255.).round().clamp(0., 255.) as u8
+                    } else {
+                        0
+                    };
+                }
+                bytes[k + 3] = (sum[3] * 255.).round().clamp(0., 255.) as u8;
+            }
+        }
+        self.export = bytes;
+    }
     fn update_plate(&mut self, p: Params) {
         for y in 0..COAT {
             for x in 0..COAT {
@@ -451,16 +513,21 @@ unsafe fn engine() -> &'static mut Engine {
 }
 #[no_mangle]
 pub extern "C" fn engine_init() {
+    engine_init_resolution(SIM);
+}
+#[no_mangle]
+pub extern "C" fn engine_init_resolution(size: usize) {
+    let n = if size == 4096 { 4096 } else { SIM };
     unsafe {
         if !ENGINE.is_null() {
             drop(Box::from_raw(ENGINE));
         }
-        ENGINE = Box::into_raw(Box::new(Engine::new(SIM)));
+        ENGINE = Box::into_raw(Box::new(Engine::new(n)));
     }
 }
 #[no_mangle]
 pub extern "C" fn simulation_size() -> usize {
-    SIM
+    unsafe { engine().n }
 }
 #[no_mangle]
 pub extern "C" fn source_size() -> usize {
@@ -587,6 +654,12 @@ pub extern "C" fn render_preview() {
     }
 }
 #[no_mangle]
+pub extern "C" fn render_export_transparent() {
+    unsafe {
+        engine().render_transparent(OUTPUT);
+    }
+}
+#[no_mangle]
 pub extern "C" fn render_export() {
     unsafe {
         engine().render(OUTPUT, true);
@@ -623,6 +696,31 @@ mod tests {
             .flat_map(|p| p.wet)
             .map(|v| v as f32 / OD_SCALE)
             .sum()
+    }
+    #[test]
+    fn transfer_is_bounded_and_has_finite_acceptance() {
+        for film in [0., 0.001, 0.05, 0.2, 1., 4.] {
+            for coverage in [0., 0.2, 1.] {
+                for split in [0., 0.5, 1.] {
+                    let mass = transferred_film(film, coverage, 0.2, split);
+                    assert!(mass >= 0. && mass <= film + 1e-6);
+                }
+            }
+        }
+        assert_eq!(transferred_film(1., 0., 0.2, 0.5), 0.);
+        assert!(transferred_film(4., 1., 0.2, 0.) <= 0.2);
+        assert!(transferred_film(1., 1., 0.4, 0.5) > transferred_film(1., 1., 0.1, 0.5));
+    }
+    #[test]
+    fn export_at_same_resolution_samples_the_original_cell() {
+        let mut e = Engine::new(256);
+        e.deposit(70, 80, 1., [1.; 3]);
+        let rgb = e.shade(70, 80);
+        e.render(256, true);
+        let k = (80 * 256 + 70) * 4;
+        for c in 0..3 {
+            assert!((e.export[k + c] as f32 - rgb[c]).abs() < 1.);
+        }
     }
     #[test]
     fn no_contact_no_transfer() {
@@ -673,6 +771,27 @@ mod tests {
         e.render(128, true);
         assert!((e.export[0] as f32 - mean).abs() < 1.);
         assert_eq!(e.export.len(), 128 * 128 * 4);
+    }
+    #[test]
+    fn transparent_export_removes_only_paper_and_averages_premultiplied_color() {
+        let mut e = Engine::new(256);
+        e.deposit(0, 0, 0.1, [0.2, 1., 2.]);
+        let ink = e.ink_rgba(0, 0);
+        assert!(ink[3] > 0. && ink[3] < 1.);
+        for c in 0..3 {
+            let transmission = (-(e.pixel(0, 0).wet[c] as f32) / OD_SCALE).exp();
+            assert!((ink[c] + 1. - ink[3] - transmission).abs() < 1e-6);
+        }
+        e.render_transparent(128);
+        assert_eq!(e.export[3], (ink[3] * 0.25 * 255.).round() as u8);
+        assert_eq!(&e.export[4..8], &[0, 0, 0, 0]);
+        let before = e.export.clone();
+        e.dry();
+        e.render_transparent(128);
+        assert_eq!(e.export, before);
+        e.new_paper();
+        e.render_transparent(128);
+        assert!(e.export.iter().all(|&v| v == 0));
     }
     #[test]
     fn drying_and_new_paper() {

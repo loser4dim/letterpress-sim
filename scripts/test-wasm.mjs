@@ -33,6 +33,22 @@ e.render_export();
 const exported = new Uint8Array(e.memory.buffer, e.export_ptr(), 4096 ** 2 * 4);
 assert.equal(exported.length, 67108864); assert.equal(exported[3], 255); assert.equal(exported.at(-1), 255);
 
+// 4K uses the actual 4096 grid, not an enlarged preview. Resetting must release paper tiles.
+e.engine_init_resolution(4096);
+assert.equal(e.simulation_size(), 4096); assert.equal(e.source_size(), 3272);
+assert.equal(e.allocated_tiles(), 0);
+const smallM = e.source_size();
+e.configure_plate(1, 150, 0);
+new Uint8Array(e.memory.buffer, e.source_ptr(), smallM ** 2).fill(0, smallM ** 2 / 2, smallM ** 2 / 2 + 16);
+e.print_begin(.7, .55, .4, .6, .55, 0, .1, 0, 0, 0, 0, 0xbc3d32);
+e.print_rows(smallM / 2, 1); e.print_finish(); assert(e.wet_total() > 0);
+e.render_export(); assert.equal(new Uint8Array(e.memory.buffer, e.export_ptr(), 4096 ** 2 * 4).length, 67108864);
+e.render_export_transparent();
+const transparent = new Uint8Array(e.memory.buffer, e.export_ptr(), 4096 ** 2 * 4);
+assert.equal(transparent[3], 0); assert.equal(transparent.at(-1), 0);
+assert(transparent.some((v, i) => i % 4 === 3 && v > 0));
+e.engine_init_resolution(123); assert.equal(e.simulation_size(), 8192);
+
 // Run the actual browser worker code in a separate Node thread with its Web APIs adapted.
 const worker = new Worker(`
 const { parentPort, workerData } = require("node:worker_threads");
@@ -67,5 +83,11 @@ try {
   assert.equal(print.result, 1); assert.equal(print.progress.at(-1), 100);
   assert.equal((await call("preview")).result.length, 640 ** 2 * 4);
   assert.equal((await call("plate", [2, .55, .1, 0, 0xbc3d32])).result.length, 512 ** 2 * 4);
+  const fourK = await call("initialize", ["test.wasm", 4096]);
+  assert.equal(fourK.result.simulation, 4096); assert.equal(fourK.result.source, 3272);
+  assert.equal(fourK.result.output, 4096);
+  const clearExport = (await call("export", [true])).result;
+  assert.equal(clearExport.length, 4096 ** 2 * 4); assert.equal(clearExport[3], 0);
+  assert.equal((await call("preview")).result.length, 640 ** 2 * 4);
 } finally { await worker.terminate(); }
-console.log("PASS: actual 8192-grid WASM, sparse allocation, 4096 export, pressure, drying, ink depletion, excess ink, and real worker messaging/progress");
+console.log("PASS: actual selectable 4096/8192-grid WASM, sparse allocation, 4096 export, pressure, drying, ink depletion, excess ink, and real worker messaging/progress");

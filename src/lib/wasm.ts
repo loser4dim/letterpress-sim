@@ -36,7 +36,8 @@ export async function loadEngine(): Promise<PrintEngine> {
   }
   const dispose = () => { disposed = true; worker.terminate(); fail(new Error("処理を終了しました")); };
   try {
-    const sizes = await call("initialize", [`${base}/wasm/letterpress_engine.wasm`]) as PrintEngine["sizes"];
+    const resolution = new URLSearchParams(location.search).get("resolution") === "4096" ? 4096 : 8192;
+    const sizes = await call("initialize", [`${base}/wasm/letterpress_engine.wasm`, resolution]) as PrintEngine["sizes"];
     return { sizes, call, dispose };
   } catch (error) { dispose(); throw error; }
 }

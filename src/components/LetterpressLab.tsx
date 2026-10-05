@@ -49,17 +49,19 @@ export default function LetterpressLab() {
         <div className="stage-heading"><h2 id="print-title">刷る</h2><span id="count">0回</span></div>
         <div className="stage-content">
           <aside>
+            <label>計算解像度<select id="resolution" defaultValue="8192"><option value="8192">8K（細かい計算）</option><option value="4096">4K（軽い計算）</option></select></label><button id="restartResolution" className="quiet">選んだ解像度で新しく始める</button><p className="hint">版・インク・紙をリセットして開始します。保存画像はどちらも4Kです。</p>
             <Range id="pressure" label="押す圧" value={55} /><Range id="roughness" label="紙の粗さ" value={55} /><Range id="speed" label="剥がす速度" value={40} /><Range id="viscosity" label="インクの粘度" value={60} />
             <p className="hint">厚塗りほど版の縁にはみ出します。低い粘度では紙ににじみ、高速の剥離では小さな飛沫が出ます。</p>
             <label>剥がす方向<select id="direction"><option value="0">左から右</option><option value="90">上から下</option><option value="45">左上から右下</option></select></label>
             <Range id="offsetX" label="横の位置" value={0} min={-100} max={100} /><Range id="offsetY" label="縦の位置" value={0} min={-100} max={100} />
+            <label className="check"><input id="transparentExport" type="checkbox" /> PNGの紙を透過する</label>
             <div className="actions"><button disabled id="print" className="primary">版を押して、刷る</button><button id="clear" className="quiet">新しい紙</button><button id="dry" className="quiet">インクを乾かす</button><button id="download" className="quiet">4K PNGを保存</button></div>
             <p id="status" className="status" role="status">読み込み中…</p>
           </aside>
           <div className="canvas-area"><div className="board"><canvas id="paper" width="640" height="640" aria-label="試し刷り結果" /><div id="empty">版にインクを塗り、「刷る」を押してください</div></div><p className="canvas-caption">刷り上がり</p></div>
         </div>
       </section>
-      <footer><a href="https://www.jstage.jst.go.jp/article/nig1958/24/1/24_1_41/_article/-char/en" target="_blank" rel="noopener">参考文献：Studies on Printing Ink Transfer (1986)</a></footer>
+      <footer><a href="https://www.jstage.jst.go.jp/article/nig1958/24/1/24_1_41/_article/-char/en" target="_blank" rel="noopener">参考文献：Studies on Printing Ink Transfer (1986)</a> · <a href="https://www.jstage.jst.go.jp/article/jtappij1955/45/7/45_7_809/_article/-char/en" target="_blank" rel="noopener">Ink Transfer Parameters (1991)</a> · <a href="https://arxiv.org/abs/2001.10209" target="_blank" rel="noopener">Liquid Bridge Breakup (2020)</a></footer>
     </main>
   </div>;
 }

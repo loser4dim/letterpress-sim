@@ -10,7 +10,7 @@ async function handle(method, args, id) {
       if (!response.ok) throw new Error(`WASM: HTTP ${response.status}`);
       const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {});
       engine = instance.exports;
-      engine.engine_init();
+      engine.engine_init_resolution(args[1] === 4096 ? 4096 : 8192);
       return { simulation: engine.simulation_size(), source: engine.source_size(), output: engine.output_size() };
     }
     case "source":
@@ -41,7 +41,7 @@ async function handle(method, args, id) {
       return engine.impression_count();
     }
     case "export":
-      engine.render_export();
+      if (args[0]) engine.render_export_transparent(); else engine.render_export();
       return pixels(engine.export_ptr(), engine.output_size() ** 2 * 4);
     default: throw new Error(`Unknown command: ${method}`);
   }
