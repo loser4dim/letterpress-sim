@@ -1,5 +1,8 @@
 import { canPlace, findSpace, rasterizePlate, snapValue } from "../../public/wasm/plate-tools.js";
-import { resizeCorner, smoothRollerAngle, glyphLayout } from "../../public/wasm/composition-tools.js";
+import { resizeCorner, smoothRollerAngle } from "../../public/wasm/composition-tools.js";
+import { glyphPixels, tightGlyphLayout } from "./glyph-tools.js";
+import { fontInfo } from "./font-catalog.js";
+import { initFontPicker } from "./font-picker.js";
 export function initLab(root, engine) {
   const abort=new AbortController(),$=id=>root.querySelector("#"+id);
   const N=640,M=512,plate=$("plate"),inkPlate=$("inkPlate"),paper=$("paper"),ctx=paper.getContext("2d");
@@ -17,7 +20,7 @@ export function initLab(root, engine) {
     root.querySelectorAll("input,select,textarea,button").forEach(e=>{e.disabled=busy;});
     for(const id of ["blockSize","blockLocked","removeBlock"])$(id).disabled=busy||!selected();
     $("blockSize").disabled=busy||!selected()||selected().locked;
-    for(const id of ["glyphFont","glyphLeft","glyphRight","glyphTop","glyphBottom"])$(id).disabled=busy||selected()?.type!=="glyph"||selected()?.locked;
+    for(const id of ["glyphFont","glyphFontBrowse","glyphLeft","glyphRight","glyphTop","glyphBottom"])$(id).disabled=busy||selected()?.type!=="glyph"||selected()?.locked;
     $("print").disabled=busy||!blocks.length;
     $("removeAssembly").disabled=busy||assemblies.length===1;
     $("newAssembly").disabled=busy||assemblies.length>=8;
@@ -43,8 +46,8 @@ export function initLab(root, engine) {
   function syncSelection() {
     fillSelect($("blockList"),blocks,selectedId);const b=selected();
     $("glyphControls").hidden=b?.type!=="glyph";
-    if(b){$("blockSize").value=Math.round(b.w);$("blockLocked").checked=!!b.locked;if(b.type==="glyph"){$("glyphFont").value=b.fontChoice;for(const side of ["Left","Right","Top","Bottom"]){const field=$("glyph"+side),value=Math.round(b.padding[side.toLowerCase()]);field.max=Math.max(32,value);field.value=value;}}}
-    active.selectedId=selectedId;outputs();controls();
+    if(b){$("blockSize").min=b.type==="glyph"?1:8;$("blockSize").value=Math.round(b.w);$("blockLocked").checked=!!b.locked;if(b.type==="glyph"){$("glyphFont").value=b.fontChoice;for(const side of ["Left","Right","Top","Bottom"]){const field=$("glyph"+side),value=Math.round(b.padding[side.toLowerCase()]);field.max=Math.max(32,value);field.value=value;}}}
+    active.selectedId=selectedId;outputs();controls();if(b?.type==="glyph")fontPicker?.preview("glyphFont");
   }
   function imageSettings(){return{kind:$("plateMode").value,separation:$("separation").value,threshold:val("threshold"),screen:val("screen"),tone:val("tone"),invert:$("invert").checked};}
   function grayBlock(b,copy=false) {
@@ -64,7 +67,7 @@ export function initLab(root, engine) {
     lc.putImageData(new ImageData(bytes,M,M),0,0);context.drawImage(layer,64,64);
     for(const b of blocks){const x=64+M-b.x-b.w,y=64+b.y;context.strokeStyle=b.id===selectedId?"#ad3e30":"#766e6155";context.lineWidth=b.id===selectedId?2:1;context.strokeRect(x,y,b.w,b.h);}
     const b=selected();
-    if(b){if(b.type==="glyph"){context.save();context.strokeStyle="#ad3e3090";context.setLineDash([3,3]);context.strokeRect(64+M-b.x-b.padding.left-b.fontSize,64+b.y+b.padding.top,b.fontSize,b.fontSize);context.restore();}
+    if(b){if(b.type==="glyph"){context.save();context.strokeStyle="#ad3e3090";context.setLineDash([3,3]);context.strokeRect(64+M-b.x-b.padding.left-b.inkW,64+b.y+b.padding.top,b.inkW,b.inkH);context.restore();}
       if(!b.locked)for(const h of corners(b)){const x=64+M-h.x,y=64+h.y;context.fillStyle="#fffaf0";context.fillRect(x-5,y-5,10,10);context.strokeStyle="#ad3e30";context.strokeRect(x-5,y-5,10,10);}}
     compositionDirty=false;
   }
@@ -98,43 +101,45 @@ export function initLab(root, engine) {
   }
   listen($("upload"),"change",event=>action(async()=>{const file=event.target.files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error("画像は20MB以下で選んでください。");const url=URL.createObjectURL(file),image=new Image();try{image.src=url;await image.decode();if(abort.signal.aborted)return;const scale=Math.min(1,2048/Math.max(image.width,image.height)),canvas=document.createElement("canvas");canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));const c=canvas.getContext("2d",{willReadFrequently:true});c.fillStyle="white";c.fillRect(0,0,canvas.width,canvas.height);c.drawImage(image,0,0,canvas.width,canvas.height);const added=fitImage(c.getImageData(0,0,canvas.width,canvas.height).data,canvas.width,canvas.height,file.name);canvas.width=canvas.height=1;syncAssemblies();if(added)await rebuild();}finally{URL.revokeObjectURL(url);$("upload").value="";}}));
   listen($("sample"),"click",()=>action(async()=>{const canvas=document.createElement("canvas");canvas.width=1024;canvas.height=640;const c=canvas.getContext("2d");c.fillStyle="white";c.fillRect(0,0,1024,640);c.fillStyle="black";c.strokeStyle="black";c.lineWidth=6;c.strokeRect(25,25,974,590);c.font="bold 190px serif";c.textAlign="center";c.fillText("活版",512,280);c.font="bold 98px serif";c.fillText("実験室",512,425);c.font="32px serif";c.fillText("INK · PAPER · PRESS",512,530);if(fitImage(c.getImageData(0,0,1024,640).data,1024,640,"サンプル画像",{...imageSettings(),kind:"binary"})){syncAssemblies();await rebuild();}}));
-  const fontLinks=[];
-  async function textFamily(text,family) {
-    if(family==="system")return '"Yu Mincho", "Hiragino Mincho ProN", serif';
-    const glyphs=[...new Set(text.replace(/\s/g,""))].join("");
-    const link=document.createElement("link");link.rel="stylesheet";link.href="https://fonts.googleapis.com/css2?family="+encodeURIComponent(family).replace(/%20/g,"+")+":wght@400&display=block&text="+encodeURIComponent(glyphs);fontLinks.push(link);
-    await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error("書体の読み込みがタイムアウトしました。端末の明朝体も選べます。")),15000);link.onload=()=>{clearTimeout(timer);resolve();};link.onerror=()=>{clearTimeout(timer);reject(new Error("Google Fontsを読み込めません。端末の明朝体も選べます。"));};document.head.append(link);});
-    const loaded=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error("書体の読み込みがタイムアウトしました。")),15000);document.fonts.load('128px "'+family+'"',text).then(result=>{clearTimeout(timer);resolve(result);},error=>{clearTimeout(timer);reject(error);});});
-    if(!loaded.length)throw new Error("選んだ書体を読み込めませんでした。");
-    return '"'+family+'"';
+  const fontStyles=[],fontLoads=new Map();let fontNumber=0;
+  async function textFamily(text,choice) {
+    const info=fontInfo(choice);if(info.css)return info.css;
+    const glyphs=[...new Set(text)].sort().join(""),key=choice+"|"+glyphs;
+    if(fontLoads.has(key))return fontLoads.get(key);
+    const loading=(async()=>{
+      const url="https://fonts.googleapis.com/css2?family="+encodeURIComponent(info.family).replace(/%20/g,"+")+":wght@"+info.weight+"&display=block&text="+encodeURIComponent(glyphs);
+      const response=await fetch(url,{signal:AbortSignal.any([abort.signal,AbortSignal.timeout(15000)])});if(!response.ok)throw new Error("Google Fontsの読み込みに失敗しました。");
+      const css=await response.text();if(abort.signal.aborted)throw new Error("読み込みを中断しました。");
+      const alias="LetterpressFont"+(++fontNumber),style=document.createElement("style");style.textContent=css.replace(/font-family\s*:[^;]+;/g,"font-family: '"+alias+"';");document.head.append(style);fontStyles.push(style);
+      const family='"'+alias+'"';
+      const loaded=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error("書体の読み込みがタイムアウトしました。")),15000);document.fonts.load(info.weight+' 128px '+family,text).then(result=>{clearTimeout(timer);resolve(result);},error=>{clearTimeout(timer);reject(error);});});
+      if(!loaded.length)throw new Error("選んだ書体を読み込めませんでした。");return family;
+    })();fontLoads.set(key,loading);try{return await loading;}catch(error){fontLoads.delete(key);throw error;}
   }
-  function glyphPixels(char,family,fontSize,padding) {
-    const unit=128/fontSize,canvas=document.createElement("canvas");canvas.width=Math.ceil(128+(padding.left+padding.right)*unit);canvas.height=Math.ceil(128+(padding.top+padding.bottom)*unit);const c=canvas.getContext("2d");c.fillStyle="white";c.fillRect(0,0,canvas.width,canvas.height);c.fillStyle="black";c.font="128px "+family;c.textBaseline="alphabetic";
-    const metrics=c.measureText(char),width=metrics.actualBoundingBoxLeft+metrics.actualBoundingBoxRight,height=metrics.actualBoundingBoxAscent+metrics.actualBoundingBoxDescent;
-    const scale=Math.min(1,128/Math.max(1,width,height));c.translate(padding.left*unit+(128-width*scale)/2+metrics.actualBoundingBoxLeft*scale,padding.top*unit+(128-height*scale)/2+metrics.actualBoundingBoxAscent*scale);c.scale(scale,scale);c.fillText(char,0,0);
-    const data={rgba:c.getImageData(0,0,canvas.width,canvas.height).data,iw:canvas.width,ih:canvas.height};canvas.width=canvas.height=1;return data;
-  }
+  const fontPicker=initFontPicker(root,{loadFamily:textFamily,isBusy:()=>busy,signal:abort.signal,onChoose:(target,choice)=>{$(target).value=choice;$(target).dispatchEvent(new Event("change",{bubbles:true}));}});
   listen($("addText"),"click",()=>action(async()=>{
     const text=$("textInput").value;if(!text.trim()){notice("文字を入力してください。");return;}
     const segmenter=new Intl.Segmenter("ja",{granularity:"grapheme"}),lines=text.replace(/\r/g,"").split("\n").map(line=>[...segmenter.segment(line)].map(s=>s.segment)),total=lines.reduce((n,l)=>n+l.length,0);
     if(total>128||blocks.filter(b=>b.type==="glyph").length+total>256){notice("追加は128文字まで、1つの版には256文字までです。");return;}
     notice("文字の書体を読み込んでいます…");const choice=$("textFont").value,family=await textFamily(text,choice);if(abort.signal.aborted)return;
-    const size=val("textSize"),pad=val("textPadding"),padding={left:pad,right:pad,top:pad,bottom:pad},layout=glyphLayout(lines,size,padding);
-    const spot=findSpace(layout.w,layout.h,blocks);if(!spot){notice("文字列を置く空きがありません。文字を小さくするか、短く分けて追加してください。");return;}
-    for(const cell of layout.cells){const b={...cell,...glyphPixels(cell.char,family,size,padding),x:spot.x+cell.x,y:spot.y+cell.y,id:nextId++,name:(cell.char===" "?"空白":cell.char)+" · "+(choice==="system"?"明朝体":choice),fontChoice:choice,family,fontSize:size,padding:{...padding},kind:"binary",separation:"luminance",threshold:150,screen:128,tone:100,invert:false,locked:false};blocks.push(b);selectedId=b.id;}
+    const size=val("textSize"),pad=val("textPadding"),padding={left:pad,right:pad,top:pad,bottom:pad},weight=fontInfo(choice).weight,rendered=lines.map(line=>line.map(char=>({char,...glyphPixels(char,family,size,padding,weight),padding:{...padding}}))),layout=tightGlyphLayout(rendered,M,size);
+    const spot=findSpace(Math.max(8,layout.w),Math.max(8,layout.h),blocks);if(!spot){notice("文字列を置く空きがありません。文字を小さくするか、短く分けて追加してください。");return;}
+    for(const cell of layout.cells){const b={...cell,x:spot.x+cell.x,y:spot.y+cell.y,id:nextId++,name:(cell.char===" "?"空白":cell.char)+" · "+fontInfo(choice).label,fontChoice:choice,family,fontSize:size,padding:{...padding},kind:"binary",separation:"luminance",threshold:150,screen:128,tone:100,invert:false,locked:false};blocks.push(b);selectedId=b.id;}
     syncSelection();await rebuild();
   }));
   listen($("blockList"),"change",()=>{selectedId=val("blockList");syncSelection();compositionDirty=true;schedulePreview();});
   listen($("removeBlock"),"click",()=>action(async()=>{const i=blocks.findIndex(b=>b.id===selectedId);if(i>=0)blocks.splice(i,1);selectedId=blocks.at(-1)?.id??null;syncSelection();await rebuild();}));
   for(const id of ["plateMode","separation","threshold","screen","tone","invert"])listen($(id),"change",()=>action(async()=>{const b=imageBlock();if(!b)return;Object.assign(b,imageSettings());await rebuild();}));
-  async function editGlyph(){const b=selected();if(b?.type!=="glyph"||b.locked)return;const padding={left:val("glyphLeft"),right:val("glyphRight"),top:val("glyphTop"),bottom:val("glyphBottom")},w=b.fontSize+padding.left+padding.right,h=b.fontSize+padding.top+padding.bottom;
-    const rect={...b,w,h};if(!canPlace(rect,blocks)){notice("余白を広げると他の台座に重なります。先に台座を移動してください。");syncSelection();return;}
-    const choice=$("glyphFont").value,family=choice===b.fontChoice?b.family:await textFamily(b.char,choice);if(abort.signal.aborted)return;
-    Object.assign(b,glyphPixels(b.char,family,b.fontSize,padding),{w,h,padding,fontChoice:choice,family,name:(b.char===" "?"空白":b.char)+" · "+(choice==="system"?"明朝体":choice),grayCache:null});syncSelection();await rebuild();
+  async function editGlyph(){const b=selected();if(b?.type!=="glyph"||b.locked)return;
+    const padding={left:val("glyphLeft"),right:val("glyphRight"),top:val("glyphTop"),bottom:val("glyphBottom")},choice=$("glyphFont").value,family=choice===b.fontChoice?b.family:await textFamily(b.char,choice);if(abort.signal.aborted)return;
+    const pixels=glyphPixels(b.char,family,b.fontSize,padding,fontInfo(choice).weight);
+    const x=b.x+b.padding.left-padding.left,y=b.y+b.padding.top+b.ascent-pixels.ascent-padding.top,rect={...b,...pixels,x,y};
+    if(!canPlace(rect,blocks)){notice("この書体や余白では台座が重なるか、版面からはみ出します。先に台座を移動してください。");syncSelection();return;}
+    Object.assign(b,pixels,{x,y,padding,fontChoice:choice,family,name:(b.char===" "?"空白":b.char)+" · "+fontInfo(choice).label,grayCache:null});syncSelection();await rebuild();
   }
   for(const id of ["glyphFont","glyphLeft","glyphRight","glyphTop","glyphBottom"])listen($(id),"change",()=>action(editGlyph));
-  function scaleGlyph(b,oldWidth){if(b.type!=="glyph")return;const factor=b.w/oldWidth;b.fontSize*=factor;for(const side of ["left","right","top","bottom"])b.padding[side]*=factor;}
-  listen($("blockSize"),"change",()=>action(async()=>{const b=selected();if(!b||b.locked){syncSelection();return;}const oldWidth=b.w,w=Math.max(8,snapValue(val("blockSize"),val("snap"))),h=Math.max(8,Math.round(w*b.h/b.w)),rect={...b,w,h};if(canPlace(rect,blocks)){Object.assign(b,{w,h});scaleGlyph(b,oldWidth);await rebuild();}else notice("その大きさでは台座が重なるか、版面からはみ出します。");syncSelection();schedulePreview();}));
+  function scaleGlyph(b,oldWidth){if(b.type!=="glyph")return;const factor=b.w/oldWidth;b.fontSize*=factor;b.inkW*=factor;b.inkH*=factor;b.ascent*=factor;for(const side of ["left","right","top","bottom"])b.padding[side]*=factor;}
+  listen($("blockSize"),"change",()=>action(async()=>{const b=selected();if(!b||b.locked){syncSelection();return;}const oldWidth=b.w,minimum=b.type==="glyph"?1:8,w=Math.max(minimum,snapValue(val("blockSize"),val("snap"))),h=Math.max(minimum,Math.round(w*b.h/b.w)),rect={...b,w,h};if(canPlace(rect,blocks)){Object.assign(b,{w,h});scaleGlyph(b,oldWidth);await rebuild();}else notice("その大きさでは台座が重なるか、版面からはみ出します。");syncSelection();schedulePreview();}));
   listen($("blockLocked"),"change",()=>{const b=selected();if(!b)return;b.locked=$("blockLocked").checked;controls();compositionDirty=true;schedulePreview();});
   plate.style.cursor="grab";inkPlate.style.cursor="crosshair";
   async function ensureRoller(){if(!rollerDirty)return;rollerDirty=false;await engine.call("rollerLoad",[val("brushSize"),val("ink")/100,$("eraseInk").checked?1:0,rgb()]);}
@@ -146,7 +151,7 @@ export function initLab(root, engine) {
     const b=handle?current:blocks.find(b=>p.x>=b.x&&p.x<b.x+b.w&&p.y>=b.y&&p.y<b.y+b.h);if(!b)return;selectedId=b.id;syncSelection();compositionDirty=true;schedulePreview();if(b.locked){notice("この台座は固定されています。");return;}plate.setPointerCapture(e.pointerId);drag={point:p,original:{x:b.x,y:b.y,w:b.w,h:b.h},corner:handle?.corner,moved:false};
   });
   listen(plate,"pointermove",e=>{if(busy||!drag)return;const p=point(e),b=selected(),o=drag.original;
-    const rect=drag.corner?{...b,...resizeCorner(o,drag.corner,p,val("snap"),b.type==="glyph"||$("keepAspect").checked)}:{...b,x:clamp(snapValue(o.x+p.x-drag.point.x,val("snap")),0,M-b.w),y:clamp(snapValue(o.y+p.y-drag.point.y,val("snap")),0,M-b.h)};
+    const rect=drag.corner?{...b,...resizeCorner(o,drag.corner,p,val("snap"),b.type==="glyph"||$("keepAspect").checked,b.type==="glyph"?1:8)}:{...b,x:clamp(snapValue(o.x+p.x-drag.point.x,val("snap")),0,M-b.w),y:clamp(snapValue(o.y+p.y-drag.point.y,val("snap")),0,M-b.h)};
     if(canPlace(rect,blocks)){Object.assign(b,{x:rect.x,y:rect.y,w:rect.w,h:rect.h});drag.moved=b.x!==o.x||b.y!==o.y||b.w!==o.w||b.h!==o.h;dirtyComposition();}else notice("台座どうしは重ねられず、版面の外には置けません。");schedulePreview();
   });
   listen(plate,"pointerup",()=>{if(!drag)return;const d=drag;drag=null;if(d.moved){scaleGlyph(selected(),d.original.w);syncSelection();return action(rebuild);}});
@@ -216,5 +221,5 @@ drawPicker();
   syncAssemblies();outputs();drawPlate();drawInk();
   busy=true;controls();
   (async()=>{try{await engine.call("compose",[[]]);await newPaper();await showPlate();notice("文字や画像を入れて、版を組んでください。");}catch(error){if(!abort.signal.aborted)failure(error);}finally{if(!abort.signal.aborted){busy=false;controls();}}})();
-  return()=>{abort.abort();fontLinks.forEach(link=>link.remove());if(previewFrame)cancelAnimationFrame(previewFrame);if(paintFrame)cancelAnimationFrame(paintFrame);engine.dispose();assemblies.length=0;paintSegments.length=0;};
+  return()=>{abort.abort();fontPicker.dispose();fontStyles.forEach(style=>style.remove());fontLoads.clear();if(previewFrame)cancelAnimationFrame(previewFrame);if(paintFrame)cancelAnimationFrame(paintFrame);engine.dispose();assemblies.length=0;paintSegments.length=0;};
 }

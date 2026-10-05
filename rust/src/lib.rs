@@ -629,10 +629,16 @@ impl Engine {
         };
         bytes.resize(size * size * 4, 0);
         let factor = self.n as f32 / size as f32;
+        let samples: &[(f32, f32)] = if self.n == size {
+            &[(0.5, 0.5)]
+        } else {
+            &[(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
+        };
+        let weight = 1. / samples.len() as f32;
         for y in 0..size {
             for x in 0..size {
                 let mut sum = [0.; 3];
-                for (fx, fy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                for &(fx, fy) in samples {
                     let rgb = self.shade(
                         ((x as f32 + fx) * factor).floor().min((self.n - 1) as f32) as usize,
                         ((y as f32 + fy) * factor).floor().min((self.n - 1) as f32) as usize,
@@ -643,7 +649,7 @@ impl Engine {
                 }
                 let k = (y * size + x) * 4;
                 for c in 0..3 {
-                    bytes[k + c] = (sum[c] * 0.25).clamp(0., 255.) as u8;
+                    bytes[k + c] = (sum[c] * weight).clamp(0., 255.) as u8;
                 }
                 bytes[k + 3] = 255;
             }
@@ -675,16 +681,22 @@ impl Engine {
         let mut bytes = std::mem::take(&mut self.export);
         bytes.resize(size * size * 4, 0);
         let factor = self.n as f32 / size as f32;
+        let samples: &[(f32, f32)] = if self.n == size {
+            &[(0.5, 0.5)]
+        } else {
+            &[(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
+        };
+        let weight = 1. / samples.len() as f32;
         for y in 0..size {
             for x in 0..size {
                 let mut sum = [0.; 4];
-                for (fx, fy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                for &(fx, fy) in samples {
                     let rgba = self.ink_rgba(
                         ((x as f32 + fx) * factor).floor().min((self.n - 1) as f32) as usize,
                         ((y as f32 + fy) * factor).floor().min((self.n - 1) as f32) as usize,
                     );
                     for c in 0..4 {
-                        sum[c] += rgba[c] * 0.25;
+                        sum[c] += rgba[c] * weight;
                     }
                 }
                 let k = (y * size + x) * 4;
@@ -815,6 +827,10 @@ pub extern "C" fn source_ptr() -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn coating_ptr() -> *const f32 {
     unsafe { engine().coat.as_ptr() }
+}
+#[no_mangle]
+pub extern "C" fn surface_ptr() -> *mut f32 {
+    unsafe { engine().surface.as_mut_ptr() }
 }
 #[no_mangle]
 pub extern "C" fn pigment_ptr() -> *mut f32 {

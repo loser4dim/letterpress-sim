@@ -9,7 +9,8 @@
     "lint": "eslint",
     "build:wasm": "node scripts/build-wasm.mjs",
     "test:wasm": "node scripts/test-wasm.mjs",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:export": "node scripts/test-wasm.mjs --export"
   },
   "dependencies": {
     "next": "16.3.8",

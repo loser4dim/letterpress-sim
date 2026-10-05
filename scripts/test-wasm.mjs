@@ -4,9 +4,12 @@ import { Worker } from "node:worker_threads";
 import { pathToFileURL } from "node:url";
 import { canPlace, findSpace, rasterizePlate, snapValue } from "../public/wasm/plate-tools.js";
 import assert from "node:assert/strict";
+import { alphaBounds,tightGlyphLayout } from "../src/lib/glyph-tools.js";
+import {FONT_CATALOG} from "../src/lib/font-catalog.js";
 import {resizeCorner,smoothRollerAngle,glyphLayout} from "../public/wasm/composition-tools.js";
 
-const { instance } = await WebAssembly.instantiate(readFileSync("public/wasm/letterpress_engine.wasm"), {});
+const assetDir=process.argv.includes("--export") ? resolve("out/_letterpress_engine",JSON.parse(readFileSync("out/_letterpress_engine/current.json","utf8")).version) : resolve("public/wasm");
+const { instance } = await WebAssembly.instantiate(readFileSync(resolve(assetDir,"letterpress_engine.wasm")), {});
 const e = instance.exports;
 e.engine_init();
 assert.equal(e.simulation_size(), 8192);
@@ -61,7 +64,7 @@ self.postMessage = (value, transfer) => parentPort.postMessage(value, transfer);
 globalThis.fetch = async () => new Response(fs.readFileSync(workerData.wasm));
 const ready = import(workerData.script);
 parentPort.on("message", async data => { await ready; self.onmessage({ data }); });
-`, { eval: true, workerData: { wasm: resolve("public/wasm/letterpress_engine.wasm"), script: pathToFileURL(resolve("public/wasm/engine-worker.js")).href } });
+`, { eval: true, workerData: { wasm: resolve(assetDir,"letterpress_engine.wasm"), script: pathToFileURL(resolve(assetDir,"engine-worker.js")).href } });
 let sequence = 0;
 const pending = new Map();
 worker.on("message", message => {
@@ -76,7 +79,7 @@ function call(method, args = [], transfer = []) {
 }
 try {
   const init = await call("initialize", ["test.wasm"]);
-  assert.equal(init.result.simulation, 8192); assert.equal(init.result.output, 4096);
+  assert.equal(init.result.apiVersion,3);assert.equal(init.result.simulation, 8192); assert.equal(init.result.output, 4096);
   await call("configure", [1, 150, 0]);
   const mask = new Uint8Array(M * M).fill(255);
   for (let y = M / 2 - 10; y < M / 2 + 10; y++) mask.fill(0, y * M + M / 2 - 10, y * M + M / 2 + 10);
@@ -139,3 +142,11 @@ assert.equal(glyphs.cells[1].x,40);assert.equal(glyphs.cells[2].y,40);assert.equ
 const padded=glyphLayout([["A","B"]],40,{left:4,right:8,top:2,bottom:6});
 assert.equal(padded.cells[1].x,52);assert.equal(padded.h,48);
 console.log("PASS: per-plate coating restore, touching glyph cells, snapped anchored corner resizing, character padding, stable roller reversals");
+
+assert(FONT_CATALOG.length>=100);assert.equal(new Set(FONT_CATALOG.map(f=>f.family)).size,FONT_CATALOG.length);
+const dot={id:2,type:"glyph",x:0,y:0,w:2,h:3};assert(canPlace(dot,[]));
+const pixels=new Uint8ClampedArray(10*10*4);pixels[(1*10+2)*4+3]=255;pixels[(8*10+7)*4+3]=1;
+assert.deepEqual(alphaBounds(pixels,10,10),{x:2,y:1,w:6,h:8});assert.equal(alphaBounds(new Uint8Array(16),2,2),null);
+const tight=tightGlyphLayout([[{char:"i",w:5,h:30,ascent:30,padding:{left:0,right:0,top:0,bottom:0}},{char:"W",w:32,h:28,ascent:28,padding:{left:0,right:0,top:0,bottom:0}},{char:"g",w:19,h:34,ascent:24,padding:{left:0,right:0,top:0,bottom:0}}]]);
+assert.equal(tight.cells[1].x,5);assert.equal(tight.cells[2].x,37);assert.equal(tight.cells[0].y+tight.cells[0].ascent,tight.cells[2].y+tight.cells[2].ascent);assert.equal(tight.w,56);assert.equal(tight.h,40);
+console.log("PASS: 100+ fonts, actual pixel-bound crop, tiny punctuation cells, proportional widths and shared baselines");

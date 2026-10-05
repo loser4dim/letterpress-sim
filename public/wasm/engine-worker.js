@@ -1,5 +1,6 @@
 import { rasterizePlate } from "./plate-tools.js";
 let engine;
+let composition=null,sourceDirty=false;
 const coatings=new Map();
 let queue = Promise.resolve();
 function pixels(pointer, length) {
@@ -12,18 +13,21 @@ async function handle(method, args, id) {
       if (!response.ok) throw new Error(`WASM: HTTP ${response.status}`);
       const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {});
       engine = instance.exports;
-      coatings.clear();
+      coatings.clear();composition=null;sourceDirty=false;
       engine.engine_init_resolution(args[1] === 4096 ? 4096 : 8192);
-      return { simulation: engine.simulation_size(), source: engine.source_size(), output: engine.output_size() };
+      return { apiVersion:3, simulation: engine.simulation_size(), source: engine.source_size(), output: engine.output_size() };
     }
     case "source":
+      composition=null;sourceDirty=false;
       new Uint8Array(engine.memory.buffer, engine.source_ptr(), args[0].length).set(args[0]);
       return null;
     case "compose": {
-      const mask = rasterizePlate(args[0], engine.source_size());
-      new Uint8Array(engine.memory.buffer, engine.source_ptr(), mask.length).set(mask);
-      engine.configure_plate(1, 150, 0);
-      engine.refresh_plate();
+      composition=args[0];sourceDirty=true;
+      // Only prepare the 512² coating-contact field while editing.
+      // The full-resolution binary plate is generated once, immediately before print.
+      const coarse=rasterizePlate(composition,2048),surface=new Float32Array(engine.memory.buffer,engine.surface_ptr(),512**2);
+      for(let y=0;y<512;y++)for(let x=0;x<512;x++){let covered=0;for(let dy=0;dy<4;dy++)for(let dx=0;dx<4;dx++)covered+=coarse[(y*4+dy)*2048+x*4+dx]===0;surface[y*512+x]=covered/16;}
+      engine.configure_plate(1,150,0);
       engine.clear_ink();
       return null;
     }
@@ -52,6 +56,10 @@ async function handle(method, args, id) {
       engine.render_preview();
       return pixels(engine.image_ptr(), 640 * 640 * 4);
     case "print": {
+      if(sourceDirty){
+        self.postMessage({id,progress:0});
+        const mask=rasterizePlate(composition,engine.source_size());new Uint8Array(engine.memory.buffer,engine.source_ptr(),mask.length).set(mask);sourceDirty=false;
+      }
       engine.print_begin(...args);
       const rows = engine.source_size();
       for (let y = 0; y < rows; y += 64) {

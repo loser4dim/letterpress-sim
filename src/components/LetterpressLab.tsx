@@ -1,14 +1,18 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { loadEngine } from "../lib/wasm";
+import { FONT_CATALOG, FONT_CATEGORIES } from "../lib/font-catalog";
 import { initLab } from "../lib/init-lab";
 function Range({ id, label, value, max = 100, min = 0 }: { id: string; label: string; value: number; max?: number; min?: number }) {
   return <label>{label}<output id={id + "Out"}>{value}</output><input disabled id={id} type="range" min={min} max={max} defaultValue={value} /></label>;
 }
+function FontOptions() {
+  return <>{FONT_CATEGORIES.map(category => <optgroup key={category} label={category}>{FONT_CATALOG.filter(font => font.category === category).map(font => <option key={font.family} value={font.family}>{font.label}</option>)}</optgroup>)}</>;
+}
 export default function LetterpressLab() {
   const root = useRef<HTMLDivElement>(null);
   const [resolution, setResolution] = useState<number | null>(null);
-  const [choice, setChoice] = useState(8192);
+  const [choice, setChoice] = useState(4096);
   useEffect(() => {
     if (resolution === null) return;
     let stopped = false;
@@ -29,7 +33,7 @@ export default function LetterpressLab() {
     <main>
       {resolution === null ? <section className="start-panel">
         <h1>計算解像度を選んで始める</h1>
-        <label>計算解像度<select id="resolution" value={choice} onChange={e => setChoice(Number(e.target.value))}><option value="8192">8K（細かい計算）</option><option value="4096">4K（軽い計算）</option></select></label>
+        <label>計算解像度<select id="resolution" value={choice} onChange={e => setChoice(Number(e.target.value))}><option value="8192">8K（細かい計算）</option><option value="4096">4K（標準・軽い計算）</option></select></label>
         <p className="hint">保存する画像はどちらも4Kです。開始後に解像度を変える場合は、版・インク・紙をリセットします。</p>
         <button id="startLab" className="primary" onClick={() => setResolution(choice)}>実験を始める</button>
       </section> : <>
@@ -47,11 +51,12 @@ export default function LetterpressLab() {
             <p className="hint">版だけを切り替えられます。刷った紙と各版のインクは残ります。参照版は組版画面だけに表示します。</p>
             <h3>文字を入れる</h3>
             <label>文字<textarea disabled id="textInput" rows={3} maxLength={128} defaultValue="活版" /></label>
-            <label>書体<select disabled id="textFont" defaultValue="system"><option value="system">端末の明朝体</option><option value="Noto Serif JP">Noto Serif JP</option><option value="Noto Sans JP">Noto Sans JP</option><option value="Zen Old Mincho">Zen Old Mincho</option><option value="Shippori Mincho">Shippori Mincho</option></select></label>
+            <label>書体<select disabled id="textFont" defaultValue="system"><FontOptions /></select></label><p id="textFontPreview" className="font-example">Letterpress Aa 0123</p><button disabled id="textFontBrowse" className="quiet">書体の見本から選ぶ</button>
+            <p className="hint">英字向け書体は日本語に対応しない場合があります。</p>
             <Range id="textSize" label="文字の大きさ" value={40} min={16} max={96} />
-            <Range id="textPadding" label="文字のまわりの余白" value={2} max={24} />
+            <Range id="textPadding" label="文字のまわりの余白" value={0} max={24} />
             <button disabled id="addText" className="quiet">1文字ずつ追加</button>
-            <p className="hint">1文字ずつ台座を作ります。改行と空白も使えます。Google Fontsの書体は通信して読み込みます。</p>
+            <p className="hint">字面ぴったりの台座を1文字ずつ作ります。改行と空白も使えます。Google Fontsの書体は通信して読み込みます。</p>
             <h3>画像を入れる</h3>
             <label>画像の版の作り方<select disabled id="plateMode" defaultValue="halftone"><option value="halftone">写真：網点（AM）</option><option value="diffusion">写真：細かい点（誤差拡散）</option><option value="binary">線画：二値化</option></select></label>
             <label>カラー画像の変換<select disabled id="separation" defaultValue="luminance"><option value="luminance">明るさ</option><option value="red">赤成分</option><option value="green">緑成分</option><option value="blue">青成分</option></select></label>
@@ -67,7 +72,7 @@ export default function LetterpressLab() {
             <label className="check"><input disabled id="blockLocked" type="checkbox" /> 位置と大きさを固定</label>
             <Range id="blockSize" label="台座の幅" value={40} min={8} max={512} />
             <div id="glyphControls" hidden>
-              <label>この文字の書体<select disabled id="glyphFont"><option value="system">端末の明朝体</option><option value="Noto Serif JP">Noto Serif JP</option><option value="Noto Sans JP">Noto Sans JP</option><option value="Zen Old Mincho">Zen Old Mincho</option><option value="Shippori Mincho">Shippori Mincho</option></select></label>
+              <label>この文字の書体<select disabled id="glyphFont" defaultValue="system"><FontOptions /></select></label><p id="glyphFontPreview" className="font-example">Letterpress Aa 0123</p><button disabled id="glyphFontBrowse" className="quiet">書体の見本から選ぶ</button>
               <Range id="glyphLeft" label="左の余白（刷り上がり）" value={2} max={32} /><Range id="glyphRight" label="右の余白（刷り上がり）" value={2} max={32} /><Range id="glyphTop" label="上の余白" value={2} max={32} /><Range id="glyphBottom" label="下の余白" value={2} max={32} />
             </div>
             <button disabled id="removeBlock" className="quiet">選んだ文字・画像を外す</button>
@@ -85,6 +90,11 @@ export default function LetterpressLab() {
             <Range id="ink" label="ローラーに補充するインク量" value={35} />
           </aside><div className="canvas-area"><div className="board plate-board"><div className="ink-surface"><canvas id="inkPlate" tabIndex={0} aria-label="ローラーで版にインクを塗る" width="640" height="640" /><div id="inkCursor" aria-hidden="true" hidden /></div></div><p className="canvas-caption">鏡像の版面 · ローラーをドラッグしてインクを載せる</p></div></div>
         </section>
+        <dialog id="fontDialog" aria-labelledby="fontDialogTitle">
+          <div className="font-dialog-heading"><h2 id="fontDialogTitle">書体を見て選ぶ</h2><button id="fontClose" type="button" className="quiet">閉じる</button></div>
+          <div className="font-filter"><label>書体名を検索<input id="fontSearch" type="search" placeholder="Garamond, Mono, Script…" /></label><label>種類<select id="fontCategory"><option value="">すべて</option>{FONT_CATEGORIES.map(category => <option key={category} value={category}>{category}</option>)}</select></label></div>
+          <label>見本の文字<input id="fontSample" type="text" maxLength={80} defaultValue="Letterpress Aa 0123" /></label><p id="fontCount" className="hint" /><div id="fontGrid" /><p className="hint">表示中の書体から順に読み込みます。</p>
+        </dialog>
         <section className="stage" aria-labelledby="print-title">
           <div className="stage-heading"><h2 id="print-title">刷る</h2><span id="count">0回</span></div>
           <div className="stage-content"><aside>

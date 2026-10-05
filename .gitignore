@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Rust build output
 /rust/target/
+
+# Build-generated engine assets
+/public/_letterpress_engine/

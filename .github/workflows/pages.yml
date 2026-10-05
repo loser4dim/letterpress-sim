@@ -55,6 +55,9 @@ jobs:
         env:
           NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
 
+      - name: Test exported engine
+        run: pnpm test:export
+
       - name: Upload site
         uses: actions/upload-pages-artifact@v5
         with:

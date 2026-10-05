@@ -1,13 +1,13 @@
 import { snapValue } from "./plate-tools.js";
 // Corner names and coordinates refer to the unmirrored printed layout.
-export function resizeCorner(original, corner, point, step=0, keepAspect=true) {
+export function resizeCorner(original, corner, point, step=0, keepAspect=true,minimum=8) {
   const east=corner.includes("e"), south=corner.includes("s");
   const ax=east?original.x:original.x+original.w, ay=south?original.y:original.y+original.h;
-  let w=Math.max(8,east?point.x-ax:ax-point.x),h=Math.max(8,south?point.y-ay:ay-point.y);
+  let w=Math.max(minimum,east?point.x-ax:ax-point.x),h=Math.max(minimum,south?point.y-ay:ay-point.y);
   if(keepAspect) {
     const scale=(w*original.w+h*original.h)/(original.w**2+original.h**2);
-    w=Math.max(8,snapValue(original.w*scale,step));h=Math.max(8,Math.round(w*original.h/original.w));
-  } else {w=Math.max(8,snapValue(w,step));h=Math.max(8,snapValue(h,step));}
+    w=Math.max(minimum,snapValue(original.w*scale,step));h=Math.max(minimum,Math.round(w*original.h/original.w));
+  } else {w=Math.max(minimum,snapValue(w,step));h=Math.max(minimum,snapValue(h,step));}
   return {...original,x:east?ax:ax-w,y:south?ay:ay-h,w,h};
 }
 export function smoothRollerAngle(previous, angle, strength=.25) {
