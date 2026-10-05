@@ -1,17 +1,49 @@
 //! Selectable 4096²/8192² sparse paper grid; output is always 4096².
-//! Plate coating uses a bilinear 512² field. Paper stores quantized optical density.
+//! Plate coating uses a bilinear 512² field. Paper stores wet absorption, dry reflectance, and transferred film height.
 use std::ptr;
 const SIM: usize = 8192;
 const OUTPUT: usize = 4096;
 const PREVIEW: usize = 640;
 const COAT: usize = 512;
 const TILE: usize = 64;
-const OD_SCALE: f32 = 4096.;
-#[derive(Clone, Copy, Default)]
+const OD_SCALE: f32 = 1024.;
+const HEIGHT_SCALE: f32 = 4096.;
+const SCATTER: f32 = 0.65;
+#[derive(Clone, Copy)]
 struct Pixel {
     wet: [u16; 3],
     dry: [u16; 3],
+    wet_height: u16,
+    dry_height: u16,
     relief: u8,
+}
+impl Default for Pixel {
+    fn default() -> Self {
+        Self {
+            wet: [0; 3],
+            dry: [65535; 3],
+            wet_height: 0,
+            dry_height: 0,
+            relief: 0,
+        }
+    }
+}
+impl Pixel {
+    fn height(self) -> f32 {
+        (self.wet_height as f32 + self.dry_height as f32) / HEIGHT_SCALE
+    }
+    fn reflectance(self) -> [f32; 3] {
+        if self.wet_height == 0 {
+            return self.dry.map(|c| c as f32 / 65535.);
+        }
+        [0, 1, 2].map(|c| {
+            layer_over(
+                self.wet[c] as f32 / OD_SCALE,
+                self.wet_height as f32 / HEIGHT_SCALE * SCATTER,
+                self.dry[c] as f32 / 65535.,
+            )
+        })
+    }
 }
 struct Engine {
     n: usize,
@@ -42,6 +74,7 @@ struct Engine {
     roller_epoch: u32,
     elasticity: f32,
     dwell: f32,
+    height_strength: f32,
 }
 #[derive(Clone, Copy, Default)]
 struct Params {
@@ -102,6 +135,7 @@ impl Engine {
             roller_epoch: 0,
             elasticity: 0.55,
             dwell: 0.4,
+            height_strength: 0.6,
         }
     }
     fn pixel(&self, x: usize, y: usize) -> Pixel {
@@ -129,10 +163,16 @@ impl Engine {
     fn dry(&mut self) {
         for tile in self.tiles.iter_mut().flatten() {
             for pixel in tile.iter_mut() {
+                if pixel.wet_height == 0 {
+                    continue;
+                }
+                let reflectance = pixel.reflectance();
                 for c in 0..3 {
-                    pixel.dry[c] = pixel.dry[c].saturating_add(pixel.wet[c]);
+                    pixel.dry[c] = (reflectance[c] * 65535.).round() as u16;
                     pixel.wet[c] = 0;
                 }
+                pixel.dry_height = pixel.dry_height.saturating_add(pixel.wet_height);
+                pixel.wet_height = 0;
             }
         }
     }
@@ -355,9 +395,24 @@ impl Engine {
         }
         let n = self.n as i32;
         let p = self.pixel_mut(x.clamp(0, n - 1) as usize, y.clamp(0, n - 1) as usize);
+        let remaining = 65535u32.saturating_sub(p.wet_height as u32 + p.dry_height as u32);
+        let mut accepted = mass.min(remaining as f32 / HEIGHT_SCALE);
         for c in 0..3 {
-            p.wet[c] = p.wet[c]
-                .saturating_add((mass * pigment[c] * OD_SCALE).round().clamp(0., 65535.) as u16);
+            if pigment[c] > 0. {
+                accepted = accepted.min((65535 - p.wet[c]) as f32 / (pigment[c] * OD_SCALE));
+            }
+        }
+        let height = (accepted * HEIGHT_SCALE).floor() as u16;
+        if height == 0 {
+            return;
+        }
+        accepted = height as f32 / HEIGHT_SCALE;
+        p.wet_height += height;
+        for c in 0..3 {
+            p.wet[c] =
+                p.wet[c].saturating_add(
+                    (accepted * pigment[c] * OD_SCALE).round().clamp(0., 65535.) as u16,
+                );
         }
     }
     fn begin(&mut self, p: Params) {
@@ -388,7 +443,8 @@ impl Engine {
                 let height = self.paper_height(x as usize, y as usize);
                 let compression =
                     1. / (1. + 1.6 * (1. + 5. * p.pressure).ln() * (0.5 + self.dwell));
-                let gap = (1. - height) * p.rough * 0.55 * compression;
+                let gap = ((1. - height) * p.rough * 0.55 * compression - previous.height() * 0.04)
+                    .max(0.);
                 let closure = p.pressure * 0.16 + local * 0.18;
                 let contact = smooth((closure - gap + 0.025) / 0.065);
                 // Emboss even without ink; the same topography determines ink contact.
@@ -497,21 +553,8 @@ impl Engine {
                 let ny =
                     (y + (a.sin() * smear).round() as i32).clamp(0, self.n as i32 - 1) as usize;
                 if nx != x as usize || ny != y as usize {
-                    let q = self.pixel(nx, ny);
                     let mobility = (mass * 0.12 * (1. - p.visc)).clamp(0., 0.1);
-                    for c in 0..3 {
-                        let exchange =
-                            ((q.wet[c] as f32 - previous.wet[c] as f32) * mobility).round() as i32;
-                        if exchange != 0 {
-                            let here = self.pixel(x as usize, y as usize).wet[c] as i32;
-                            let there = q.wet[c] as i32;
-                            let delta = exchange
-                                .clamp(-here, there)
-                                .clamp(-(65535 - there), 65535 - here);
-                            self.pixel_mut(x as usize, y as usize).wet[c] = (here + delta) as u16;
-                            self.pixel_mut(nx, ny).wet[c] = (there - delta) as u16;
-                        }
-                    }
+                    self.flow_wet(x as usize, y as usize, nx, ny, mobility);
                 }
             }
         }
@@ -525,21 +568,58 @@ impl Engine {
         self.paint_snapshot.clear();
         self.count += 1;
     }
+    // Move a fraction of the thicker wet film together with its pigments.
+    // Dry layers never migrate. Quantization is conservative in both reservoirs.
+    fn flow_wet(&mut self, x: usize, y: usize, nx: usize, ny: usize, mobility: f32) {
+        if x == nx && y == ny {
+            return;
+        }
+        let a = self.pixel(x, y);
+        let b = self.pixel(nx, ny);
+        let (sx, sy, tx, ty, source, target) = if a.wet_height >= b.wet_height {
+            (x, y, nx, ny, a, b)
+        } else {
+            (nx, ny, x, y, b, a)
+        };
+        if source.wet_height == 0 {
+            return;
+        }
+        let mut amount = ((source.wet_height - target.wet_height) as f32 * mobility.clamp(0., 1.))
+            .round()
+            .min((65535 - target.wet_height) as f32);
+        for c in 0..3 {
+            if source.wet[c] > 0 {
+                amount = amount.min(
+                    (65535 - target.wet[c]) as f32 * source.wet_height as f32
+                        / source.wet[c] as f32,
+                );
+            }
+        }
+        let amount = amount.floor() as u16;
+        if amount == 0 {
+            return;
+        }
+        let fraction = amount as f32 / source.wet_height as f32;
+        for c in 0..3 {
+            let delta = (source.wet[c] as f32 * fraction).round() as u16;
+            self.pixel_mut(sx, sy).wet[c] -= delta;
+            self.pixel_mut(tx, ty).wet[c] += delta;
+        }
+        self.pixel_mut(sx, sy).wet_height -= amount;
+        self.pixel_mut(tx, ty).wet_height += amount;
+    }
     fn shade(&self, x: usize, y: usize) -> [f32; 3] {
         let p = self.pixel(x, y);
-        let left = self.pixel(x.saturating_sub(1), y).relief as f32;
-        let above = self.pixel(x, y.saturating_sub(1)).relief as f32;
+        let left = self.pixel(x.saturating_sub(1), y);
+        let above = self.pixel(x, y.saturating_sub(1));
+        let slope = (left.height() + above.height() - 2. * p.height()).clamp(-1., 1.);
         let shade = (0.977
             + 0.025 * self.paper_height(x, y)
-            + 0.12 * (left + above - 2. * p.relief as f32) / 255.)
-            .clamp(0.85, 1.08);
-        let mut rgb = [0.; 3];
-        for c in 0..3 {
-            rgb[c] = [249., 245., 232.][c]
-                * shade
-                * (-(p.dry[c] as f32 + p.wet[c] as f32) / OD_SCALE).exp();
-        }
-        rgb
+            + 0.12 * (left.relief as f32 + above.relief as f32 - 2. * p.relief as f32) / 255.
+            + self.height_strength * 0.18 * slope)
+            .clamp(0.75, 1.12);
+        let reflection = p.reflectance();
+        [0, 1, 2].map(|c| [249., 245., 232.][c] * shade * reflection[c])
     }
     fn render(&mut self, size: usize, export: bool) {
         let mut bytes = if export {
@@ -576,19 +656,19 @@ impl Engine {
     }
     fn ink_rgba(&self, x: usize, y: usize) -> [f32; 4] {
         let p = self.pixel(x, y);
-        let density = [0, 1, 2].map(|c| (p.wet[c] as f32 + p.dry[c] as f32) / OD_SCALE);
-        let maximum = density.iter().copied().fold(0., f32::max);
-        if maximum == 0. {
+        if p.height() == 0. {
             return [0.; 4];
         }
-        // Optical-density filter represented as RGBA over white. Premultiplied RGB
-        // allows averaging without beige paper fringes at thin/antialiased edges.
-        let transmission_min = (-maximum).exp();
+        let reflection = p.reflectance();
+        // White-background-equivalent RGBA; alpha also represents white pigment.
+        // This does not preserve spectral scattering on arbitrary backgrounds.
+        let alpha = (1. - (-p.height() * SCATTER).exp())
+            .max(1. - reflection.iter().copied().fold(1., f32::min));
         [
-            (-density[0]).exp() - transmission_min,
-            (-density[1]).exp() - transmission_min,
-            (-density[2]).exp() - transmission_min,
-            1. - transmission_min,
+            reflection[0] - (1. - alpha),
+            reflection[1] - (1. - alpha),
+            reflection[2] - (1. - alpha),
+            alpha,
         ]
     }
     fn render_transparent(&mut self, size: usize) {
@@ -631,8 +711,9 @@ impl Engine {
                 let bare = 188. - 90. * covered;
                 let k = (y * COAT + COAT - 1 - x) * 4;
                 for c in 0..3 {
-                    self.plate[k + c] =
-                        (bare * (1. - opacity) + 255. * (-pigment[c] * 0.9).exp() * opacity) as u8;
+                    self.plate[k + c] = (bare * (1. - opacity)
+                        + 255. * layer_over(pigment[c] * 0.9, SCATTER * 0.9, 1.) * opacity)
+                        as u8;
                 }
                 self.plate[k + 3] = 255;
             }
@@ -665,8 +746,30 @@ fn paper_heights(seed: u32) -> Vec<f32> {
     }
     result
 }
+// Finite homogeneous Kubelka–Munk layer, using integrated K and S.
+// RGB coefficients are estimated from the picker, not measured spectra.
+// Stable exponential form avoids overflow for thick or very dark films.
+fn layer_over(k: f32, s: f32, bottom: f32) -> f32 {
+    if s < 1e-7 {
+        return bottom * (-2. * k.max(0.)).exp();
+    }
+    let (r, t) = if k < 1e-7 {
+        (s / (1. + s), 1. / (1. + s))
+    } else {
+        let a = 1. + k / s;
+        let b = (a * a - 1.).sqrt();
+        let d = b * s;
+        let e = (-2. * d).exp();
+        let denom = a * (1. - e) + b * (1. + e);
+        ((1. - e) / denom, 2. * b * (-d).exp() / denom)
+    };
+    (r + t * t * bottom / (1. - r * bottom).max(1e-7)).clamp(0., 1.)
+}
 fn absorption(rgb: u32) -> [f32; 3] {
-    [rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255].map(|c| -(c as f32 / 255.).max(0.04).ln())
+    [rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255].map(|c| {
+        let r = (c as f32 / 255.).max(0.04);
+        SCATTER * (1. - r).powi(2) / (2. * r)
+    })
 }
 fn hash(x: i32, y: i32, s: u32) -> f32 {
     let mut a = (x as u32).wrapping_add(17).wrapping_mul(374761393)
@@ -712,6 +815,10 @@ pub extern "C" fn source_ptr() -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn coating_ptr() -> *const f32 {
     unsafe { engine().coat.as_ptr() }
+}
+#[no_mangle]
+pub extern "C" fn pigment_ptr() -> *mut f32 {
+    unsafe { engine().pigment.as_mut_ptr().cast::<f32>() }
 }
 #[no_mangle]
 pub extern "C" fn image_ptr() -> *const u8 {
@@ -790,10 +897,11 @@ pub extern "C" fn roller_move(x0: f32, y0: f32, x1: f32, y1: f32) {
     }
 }
 #[no_mangle]
-pub extern "C" fn configure_materials(elasticity: f32, dwell: f32) {
+pub extern "C" fn configure_materials(elasticity: f32, dwell: f32, height_strength: f32) {
     unsafe {
         engine().elasticity = elasticity.clamp(0., 1.);
         engine().dwell = dwell.clamp(0., 1.);
+        engine().height_strength = height_strength.clamp(0., 1.);
     }
 }
 #[no_mangle]
@@ -874,8 +982,8 @@ pub extern "C" fn wet_total() -> f64 {
             .iter()
             .flatten()
             .flat_map(|t| t.iter())
-            .flat_map(|p| p.wet)
-            .fold(0.0, |sum, v| sum + v as f64 / OD_SCALE as f64)
+            .map(|p| p.wet_height)
+            .fold(0.0, |sum, v| sum + v as f64 / HEIGHT_SCALE as f64)
     }
 }
 #[cfg(test)]
@@ -1078,7 +1186,7 @@ mod tests {
         let ink = e.ink_rgba(0, 0);
         assert!(ink[3] > 0. && ink[3] < 1.);
         for c in 0..3 {
-            let transmission = (-(e.pixel(0, 0).wet[c] as f32) / OD_SCALE).exp();
+            let transmission = e.pixel(0, 0).reflectance()[c];
             assert!((ink[c] + 1. - ink[3] - transmission).abs() < 1e-6);
         }
         e.render_transparent(128);
@@ -1087,10 +1195,94 @@ mod tests {
         let before = e.export.clone();
         e.dry();
         e.render_transparent(128);
-        assert_eq!(e.export, before);
+        assert!(e
+            .export
+            .iter()
+            .zip(before)
+            .all(|(a, b)| (*a as i16 - b as i16).abs() <= 1));
         e.new_paper();
         e.render_transparent(128);
         assert!(e.export.iter().all(|&v| v == 0));
+    }
+    #[test]
+    fn wet_mix_is_order_independent_but_dry_layers_are_ordered() {
+        let paint = |first, second, dry| {
+            let mut e = Engine::new(256);
+            e.deposit(20, 20, 0.8, absorption(first));
+            if dry {
+                e.dry();
+            }
+            e.deposit(20, 20, 0.8, absorption(second));
+            e.pixel(20, 20).reflectance()
+        };
+        let wet = paint(0xe83020, 0x2040df, false);
+        assert_eq!(wet, paint(0x2040df, 0xe83020, false));
+        let layered = paint(0xe83020, 0x2040df, true);
+        let reversed = paint(0x2040df, 0xe83020, true);
+        assert!(wet.iter().zip(layered).any(|(a, b)| (a - b).abs() > 0.02));
+        assert!(layered
+            .iter()
+            .zip(reversed)
+            .any(|(a, b)| (a - b).abs() > 0.02));
+    }
+    #[test]
+    fn thickness_persists_and_wet_flow_cannot_move_dry_pigment() {
+        let mut e = Engine::new(256);
+        e.deposit(20, 20, 0.4, absorption(0xbc3d32));
+        let height = e.pixel(20, 20).height();
+        e.dry();
+        assert_eq!(e.pixel(20, 20).height(), height);
+        let dry = e.pixel(20, 20).dry;
+        let dry_height = e.pixel(20, 20).dry_height;
+        e.deposit(20, 20, 0.6, absorption(0x2040df));
+        let before = e.pixel(20, 20);
+        e.flow_wet(20, 20, 21, 20, 0.5);
+        let a = e.pixel(20, 20);
+        let b = e.pixel(21, 20);
+        assert_eq!(a.dry, dry);
+        assert_eq!(a.dry_height, dry_height);
+        assert_eq!(b.dry_height, 0);
+        assert_eq!(
+            a.wet_height as u32 + b.wet_height as u32,
+            before.wet_height as u32
+        );
+        for c in 0..3 {
+            assert_eq!(a.wet[c] as u32 + b.wet[c] as u32, before.wet[c] as u32);
+        }
+        assert!(b.wet_height > 0);
+    }
+    #[test]
+    fn white_ink_exports_and_optical_layers_are_bounded() {
+        let mut e = Engine::new(256);
+        e.deposit(0, 0, 0.5, absorption(0xffffff));
+        let ink = e.ink_rgba(0, 0);
+        assert!(ink[3] > 0.);
+        assert!((ink[0] / ink[3] - 1.).abs() < 1e-5);
+        for k in [0., 0.001, 1., 60.] {
+            for s in [0., 0.001, 1., 60.] {
+                for b in [0., 0.5, 1.] {
+                    let r = layer_over(k, s, b);
+                    assert!(r.is_finite() && (0. ..=1.).contains(&r));
+                }
+            }
+        }
+        assert_eq!(std::mem::size_of::<Pixel>(), 18);
+    }
+    #[test]
+    fn saturated_films_keep_absorption_and_height_consistent() {
+        let mut e = Engine::new(256);
+        let pigment = absorption(0x000000);
+        e.deposit(0, 0, 100., pigment);
+        let p = e.pixel(0, 0);
+        assert!(p.height() <= 16.);
+        for c in 0..3 {
+            assert!((p.wet[c] as f32 / OD_SCALE - p.height() * pigment[c]).abs() < 0.001);
+        }
+        e.dry();
+        e.deposit(0, 0, 100., absorption(0xffffff));
+        e.dry();
+        assert!(e.pixel(0, 0).height() <= 16.);
+        assert_eq!(e.pixel(0, 0).wet_height, 0);
     }
     #[test]
     fn drying_and_new_paper() {
@@ -1099,7 +1291,9 @@ mod tests {
         let before = e.shade(20, 20);
         e.dry();
         assert_eq!(total(&e), 0.);
-        assert_eq!(e.shade(20, 20), before);
+        for c in 0..3 {
+            assert!((e.shade(20, 20)[c] - before[c]).abs() < 0.01);
+        }
         e.new_paper();
         assert!(e.tiles.iter().all(Option::is_none));
     }

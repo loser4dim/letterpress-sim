@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import { pathToFileURL } from "node:url";
-import { canPlace, findSpace, rasterizePlate } from "../public/wasm/plate-tools.js";
+import { canPlace, findSpace, rasterizePlate, snapValue } from "../public/wasm/plate-tools.js";
 import assert from "node:assert/strict";
+import {resizeCorner,smoothRollerAngle,glyphLayout} from "../public/wasm/composition-tools.js";
 
 const { instance } = await WebAssembly.instantiate(readFileSync("public/wasm/letterpress_engine.wasm"), {});
 const e = instance.exports;
@@ -24,7 +25,7 @@ print(0); assert.equal(e.wet_total(), 0); assert.equal(e.allocated_tiles(), 0);
 print(.7); assert(e.wet_total() > 0); assert(e.allocated_tiles() < 32);
 e.render_preview(); const printed = new Uint8Array(e.memory.buffer, e.image_ptr(), 640 ** 2 * 4).slice();
 e.dry_ink(); assert.equal(e.wet_total(), 0); e.render_preview();
-assert.deepEqual(new Uint8Array(e.memory.buffer, e.image_ptr(), 640 ** 2 * 4), printed);
+assert(new Uint8Array(e.memory.buffer, e.image_ptr(), 640 ** 2 * 4).every((v,i)=>Math.abs(v-printed[i])<=1));
 e.new_paper(); e.clear_ink(); print(.7, 2); assert.equal(e.wet_total(), 0);
 e.paint_ink(256, 256, 45, .8, 0, 0xbc3d32);
 const before = coat().reduce((a, b) => a + b, 0);
@@ -92,6 +93,14 @@ try {
   await call("compose", [[tinyBlock]], [tinyBlock.gray.buffer]);
   await call("rollerLoad", [90,.8,0,0xbc3d32]);
   await call("roller", [[[210,240,290,240]]]);
+  const coated=(await call("plate",[2,.8,0,0,0xbc3d32])).result;
+  await call("saveCoating",[1]);
+  await call("compose",[[]]);
+  assert.notDeepEqual((await call("plate",[2,.8,0,0,0xbc3d32])).result,coated);
+  const restoreBlock={...tinyBlock,gray:new Uint8Array([0,0,0,0])};
+  await call("compose",[[restoreBlock]],[restoreBlock.gray.buffer]);
+  await call("restoreCoating",[1]);
+  assert.deepEqual((await call("plate",[2,.8,0,0,0xbc3d32])).result,coated);
   await call("materials", [.8,.7]);
   await call("print", [.7,.55,.4,.6,.55,2,.1,0,0,0,0,0xbc3d32]);
   const inkExport = (await call("export", [true])).result;
@@ -102,6 +111,7 @@ try {
   assert.equal((await call("preview")).result.length, 640 ** 2 * 4);
 } finally { await worker.terminate(); }
 // Mechanical bounds and screen-area regression: photograph tones must remain distinct.
+assert.equal(snapValue(250,8),248); assert.equal(snapValue(251,0),251); assert.equal(snapValue(15,16),16);
 const first={id:1,x:10,y:10,w:100,h:100};
 assert(!canPlace({id:2,x:50,y:50,w:80,h:80},[first]));
 assert(canPlace({id:2,x:112,y:10,w:80,h:80},[first]));
@@ -115,3 +125,17 @@ for(let i=1;i<tones.length;i++)assert(tones[i]>tones[i-1]+.1);
 assert(Math.abs(tones[2]-(1-128/255)*.96)<.025);
 assert(toneCoverage(128,"diffusion")>.4&&toneCoverage(128,"diffusion")<.6);
 console.log("PASS: actual selectable 4096/8192-grid WASM, sparse allocation, 4096 export, pressure, drying, ink depletion, excess ink, and real worker messaging/progress");
+
+const adjacentGlyphs=[{id:1,type:"glyph",x:0,y:0,w:40,h:40}];
+assert(canPlace({id:2,type:"glyph",x:40,y:0,w:40,h:40},adjacentGlyphs));
+assert(!canPlace({id:2,type:"glyph",x:39,y:0,w:40,h:40},adjacentGlyphs));
+assert(!canPlace({id:2,type:"image",x:40,y:0,w:40,h:40},adjacentGlyphs));
+const corner=resizeCorner({x:80,y:96,w:64,h:32},"nw",{x:48,y:80},8,true);
+assert.equal(corner.x+corner.w,144);assert.equal(corner.y+corner.h,128);assert.equal(corner.w%8,0);assert.equal(corner.w/corner.h,2);
+assert(Math.abs(smoothRollerAngle(0,Math.PI))<1e-6);
+assert(Math.abs(smoothRollerAngle(Math.PI/2,-Math.PI/2)-Math.PI/2)<1e-6);
+const glyphs=glyphLayout([["A","B"],["C"]],40,{left:0,right:0,top:0,bottom:0});
+assert.equal(glyphs.cells[1].x,40);assert.equal(glyphs.cells[2].y,40);assert.equal(glyphs.w,80);assert.equal(glyphs.h,80);
+const padded=glyphLayout([["A","B"]],40,{left:4,right:8,top:2,bottom:6});
+assert.equal(padded.cells[1].x,52);assert.equal(padded.h,48);
+console.log("PASS: per-plate coating restore, touching glyph cells, snapped anchored corner resizing, character padding, stable roller reversals");

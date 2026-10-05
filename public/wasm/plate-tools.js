@@ -4,7 +4,7 @@ export function overlaps(a, b, gap = 2) {
   return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
 }
 export function canPlace(rect, blocks, exceptId = rect.id) {
-  return rect.w >= 8 && rect.h >= 8 && rect.x >= 0 && rect.y >= 0 && rect.x + rect.w <= PLATE_SIZE && rect.y + rect.h <= PLATE_SIZE && blocks.every(b => b.id === exceptId || !overlaps(rect, b));
+  return rect.w >= 8 && rect.h >= 8 && rect.x >= 0 && rect.y >= 0 && rect.x + rect.w <= PLATE_SIZE && rect.y + rect.h <= PLATE_SIZE && blocks.every(b => b.id === exceptId || !overlaps(rect, b, rect.type === "glyph" && b.type === "glyph" ? 0 : 2));
 }
 export function findSpace(w, h, blocks) {
   for (let y = 0; y + h <= PLATE_SIZE; y += 4) for (let x = 0; x + w <= PLATE_SIZE; x += 4) {
@@ -66,3 +66,5 @@ export function rasterizePlate(blocks, size) {
   }
   return result;
 }
+
+export function snapValue(value, step=0) { return step>0 ? Math.round(value/step)*step : Math.round(value); }
