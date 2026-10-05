@@ -3,9 +3,9 @@ export type PrintEngine = {
   call(method: string, args?: unknown[], transfer?: Transferable[], progress?: (percent: number) => void): Promise<unknown>;
   dispose(): void;
 };
-export async function loadEngine(): Promise<PrintEngine> {
+export async function loadEngine(resolution = 8192): Promise<PrintEngine> {
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-  const worker = new Worker(`${base}/wasm/engine-worker.js`);
+  const worker = new Worker(`${base}/wasm/engine-worker.js`, { type: "module" });
   let sequence = 0;
   const pending = new Map<number, {
     resolve(value: unknown): void;
@@ -36,7 +36,6 @@ export async function loadEngine(): Promise<PrintEngine> {
   }
   const dispose = () => { disposed = true; worker.terminate(); fail(new Error("処理を終了しました")); };
   try {
-    const resolution = new URLSearchParams(location.search).get("resolution") === "4096" ? 4096 : 8192;
     const sizes = await call("initialize", [`${base}/wasm/letterpress_engine.wasm`, resolution]) as PrintEngine["sizes"];
     return { sizes, call, dispose };
   } catch (error) { dispose(); throw error; }

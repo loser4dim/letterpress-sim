@@ -1,3 +1,4 @@
+import { rasterizePlate } from "./plate-tools.js";
 let engine;
 let queue = Promise.resolve();
 function pixels(pointer, length) {
@@ -16,7 +17,20 @@ async function handle(method, args, id) {
     case "source":
       new Uint8Array(engine.memory.buffer, engine.source_ptr(), args[0].length).set(args[0]);
       return null;
-    case "configure": engine.configure_plate(...args); return null;
+    case "compose": {
+      const mask = rasterizePlate(args[0], engine.source_size());
+      new Uint8Array(engine.memory.buffer, engine.source_ptr(), mask.length).set(mask);
+      engine.configure_plate(1, 150, 0);
+      engine.refresh_plate();
+      engine.clear_ink();
+      return null;
+    }
+    case "configure": engine.configure_plate(...args); engine.refresh_plate(); return null;
+    case "rollerLoad": engine.roller_load(...args); return null;
+    case "roller":
+      for (const segment of args[0]) engine.roller_move(...segment);
+      return null;
+    case "materials": engine.configure_materials(...args); return null;
     case "paint":
       for (const [x, y] of args[0]) engine.paint_ink(x, y, ...args.slice(1));
       return null;

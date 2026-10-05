@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Worker } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
+import { canPlace, findSpace, rasterizePlate } from "../public/wasm/plate-tools.js";
 import assert from "node:assert/strict";
 
 const { instance } = await WebAssembly.instantiate(readFileSync("public/wasm/letterpress_engine.wasm"), {});
@@ -56,9 +58,9 @@ const fs = require("node:fs");
 globalThis.self = globalThis;
 self.postMessage = (value, transfer) => parentPort.postMessage(value, transfer);
 globalThis.fetch = async () => new Response(fs.readFileSync(workerData.wasm));
-parentPort.on("message", data => self.onmessage({ data }));
-require("node:vm").runInThisContext(fs.readFileSync(workerData.script, "utf8"));
-`, { eval: true, workerData: { wasm: resolve("public/wasm/letterpress_engine.wasm"), script: resolve("public/wasm/engine-worker.js") } });
+const ready = import(workerData.script);
+parentPort.on("message", async data => { await ready; self.onmessage({ data }); });
+`, { eval: true, workerData: { wasm: resolve("public/wasm/letterpress_engine.wasm"), script: pathToFileURL(resolve("public/wasm/engine-worker.js")).href } });
 let sequence = 0;
 const pending = new Map();
 worker.on("message", message => {
@@ -86,8 +88,30 @@ try {
   const fourK = await call("initialize", ["test.wasm", 4096]);
   assert.equal(fourK.result.simulation, 4096); assert.equal(fourK.result.source, 3272);
   assert.equal(fourK.result.output, 4096);
+  const tinyBlock={id:1,x:220,y:220,w:48,h:48,iw:2,ih:2,gray:new Uint8Array([0,0,0,0]),kind:"binary",threshold:150,screen:128,tone:125,invert:false};
+  await call("compose", [[tinyBlock]], [tinyBlock.gray.buffer]);
+  await call("rollerLoad", [90,.8,0,0xbc3d32]);
+  await call("roller", [[[210,240,290,240]]]);
+  await call("materials", [.8,.7]);
+  await call("print", [.7,.55,.4,.6,.55,2,.1,0,0,0,0,0xbc3d32]);
+  const inkExport = (await call("export", [true])).result;
+  assert.equal(inkExport[3],0); assert(inkExport.some((v,i)=>i%4===3&&v>0));
+  await call("new");
   const clearExport = (await call("export", [true])).result;
   assert.equal(clearExport.length, 4096 ** 2 * 4); assert.equal(clearExport[3], 0);
   assert.equal((await call("preview")).result.length, 640 ** 2 * 4);
 } finally { await worker.terminate(); }
+// Mechanical bounds and screen-area regression: photograph tones must remain distinct.
+const first={id:1,x:10,y:10,w:100,h:100};
+assert(!canPlace({id:2,x:50,y:50,w:80,h:80},[first]));
+assert(canPlace({id:2,x:112,y:10,w:80,h:80},[first]));
+assert(findSpace(100,100,[first]));
+function toneCoverage(gray,kind="halftone") {
+  const block={id:1,x:0,y:0,w:512,h:512,iw:2,ih:2,gray:new Uint8Array(4).fill(gray),kind,threshold:150,screen:64,tone:100,invert:false};
+  return rasterizePlate([block],512).reduce((sum,v)=>sum+(v===0?1:0),0)/512**2;
+}
+const tones=[240,192,128,64,16].map(v=>toneCoverage(v));
+for(let i=1;i<tones.length;i++)assert(tones[i]>tones[i-1]+.1);
+assert(Math.abs(tones[2]-(1-128/255)*.96)<.025);
+assert(toneCoverage(128,"diffusion")>.4&&toneCoverage(128,"diffusion")<.6);
 console.log("PASS: actual selectable 4096/8192-grid WASM, sparse allocation, 4096 export, pressure, drying, ink depletion, excess ink, and real worker messaging/progress");

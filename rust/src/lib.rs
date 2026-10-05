@@ -32,6 +32,16 @@ struct Engine {
     depletion: Vec<f32>,
     paint_snapshot: Vec<f32>,
     params: Params,
+    surface: Vec<f32>,
+    heights: Vec<f32>,
+    roller_film: Vec<f32>,
+    roller_pigment: Vec<[f32; 3]>,
+    roller_width: usize,
+    roller_erase: bool,
+    roller_marks: Vec<u32>,
+    roller_epoch: u32,
+    elasticity: f32,
+    dwell: f32,
 }
 #[derive(Clone, Copy, Default)]
 struct Params {
@@ -82,6 +92,16 @@ impl Engine {
             depletion: vec![0.; COAT * COAT],
             paint_snapshot: vec![0.; COAT * COAT],
             params: Params::default(),
+            surface: vec![0.; COAT * COAT],
+            heights: paper_heights(41),
+            roller_film: vec![0.; COAT],
+            roller_pigment: vec![[0.; 3]; COAT],
+            roller_width: 90,
+            roller_erase: false,
+            roller_marks: vec![0; COAT * COAT],
+            roller_epoch: 0,
+            elasticity: 0.55,
+            dwell: 0.4,
         }
     }
     fn pixel(&self, x: usize, y: usize) -> Pixel {
@@ -104,6 +124,7 @@ impl Engine {
         self.tiles.iter_mut().for_each(|t| *t = None);
         self.count = 0;
         self.seed = self.seed.wrapping_add(7);
+        self.heights = paper_heights(self.seed);
     }
     fn dry(&mut self) {
         for tile in self.tiles.iter_mut().flatten() {
@@ -197,6 +218,105 @@ impl Engine {
         }
         (load, color, k)
     }
+    fn refresh_surface(&mut self) {
+        for y in 0..COAT {
+            for x in 0..COAT {
+                let mut covered = 0.;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        covered += self.mask(
+                            ((x as f32 + (sx as f32 + 0.5) / 4.) / COAT as f32 * self.m as f32)
+                                as i32,
+                            ((y as f32 + (sy as f32 + 0.5) / 4.) / COAT as f32 * self.m as f32)
+                                as i32,
+                        );
+                    }
+                }
+                self.surface[y * COAT + x] = covered / 16.;
+            }
+        }
+    }
+    fn roller_load(&mut self, width: f32, amount: f32, erase: bool, rgb: u32) {
+        self.roller_width = width.round().clamp(16., 256.) as usize;
+        self.roller_film.fill(amount.clamp(0., 1.) * 1.1);
+        self.roller_pigment.fill(absorption(rgb));
+        self.roller_erase = erase;
+    }
+    fn roller_move(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if !distance.is_finite() || distance < 0.25 {
+            return;
+        }
+        let nx = -dy / distance;
+        let ny = dx / distance;
+        let steps = distance.ceil() as usize;
+        self.roller_epoch = self.roller_epoch.wrapping_add(1);
+        if self.roller_epoch == 0 {
+            self.roller_marks.fill(0);
+            self.roller_epoch = 1;
+        }
+        for step in 0..steps {
+            let t = (step as f32 + 0.5) / steps as f32;
+            for bin in 0..self.roller_width {
+                let across = bin as f32 + 0.5 - self.roller_width as f32 / 2.;
+                let x = (x0 + dx * t + nx * across).round() as i32;
+                let y = (y0 + dy * t + ny * across).round() as i32;
+                if x < 0 || y < 0 || x >= COAT as i32 || y >= COAT as i32 {
+                    continue;
+                }
+                let k = y as usize * COAT + x as usize;
+                let area = self.surface[k];
+                if area == 0. || self.roller_marks[k] == self.roller_epoch {
+                    continue;
+                }
+                self.roller_marks[k] = self.roller_epoch;
+                let edge = ((self.roller_width as f32 / 2. - across.abs()) / 2.).clamp(0., 1.);
+                let contact = 0.28 * edge;
+                let old = self.coat[k];
+                let delta = if self.roller_erase {
+                    -old * contact
+                } else {
+                    (self.roller_film[bin] - old) * contact
+                };
+                let next = (old + delta).max(0.);
+                if delta > 0. {
+                    for c in 0..3 {
+                        self.pigment[k][c] =
+                            (self.pigment[k][c] * old + self.roller_pigment[bin][c] * delta) / next;
+                    }
+                    self.roller_film[bin] = (self.roller_film[bin] - delta * area / 64.).max(0.);
+                } else if delta < 0. && !self.roller_erase {
+                    let pickup = -delta * area / 64.;
+                    let q = self.roller_film[bin];
+                    for c in 0..3 {
+                        self.roller_pigment[bin][c] = (self.roller_pigment[bin][c] * q
+                            + self.pigment[k][c] * pickup)
+                            / (q + pickup);
+                    }
+                    self.roller_film[bin] += pickup;
+                }
+                self.coat[k] = next;
+                if next == 0. {
+                    self.pigment[k] = [0.; 3];
+                }
+            }
+        }
+        self.paint_snapshot.clear();
+    }
+    fn paper_height(&self, x: usize, y: usize) -> f32 {
+        let fx = x as f32 / (self.n - 1) as f32 * (COAT - 1) as f32;
+        let fy = y as f32 / (self.n - 1) as f32 * (COAT - 1) as f32;
+        let ix = fx.floor() as usize;
+        let iy = fy.floor() as usize;
+        let tx = fx - ix as f32;
+        let ty = fy - iy as f32;
+        let ix1 = (ix + 1).min(COAT - 1);
+        let iy1 = (iy + 1).min(COAT - 1);
+        (self.heights[iy * COAT + ix] * (1. - tx) + self.heights[iy * COAT + ix1] * tx) * (1. - ty)
+            + (self.heights[iy1 * COAT + ix] * (1. - tx) + self.heights[iy1 * COAT + ix1] * tx) * ty
+    }
     fn paint(&mut self, x: f32, y: f32, r: f32, strength: f32, erase: bool, rgb: u32) {
         let r = r.clamp(1., 128.);
         let pigment = absorption(rgb);
@@ -259,35 +379,27 @@ impl Engine {
                     continue;
                 }
                 let (local, pigment, k) = self.coating(px as i32, py as i32, p);
-                if local == 0. {
-                    continue;
-                }
                 let x = px as i32 + self.border as i32 + (p.ox as f32 * scale).round() as i32;
                 let y = py as i32 + self.border as i32 + (p.oy as f32 * scale).round() as i32;
                 if x < 0 || y < 0 || x >= self.n as i32 || y >= self.n as i32 {
                     continue;
                 }
-                let grain = hash(x / 4, y / 4, self.seed) * 0.65 + hash(x, y, self.seed) * 0.35;
-                let lx = x as f32 / scale;
-                let ly = y as f32 / scale;
-                let fiber = (0.5
-                    + 0.22 * (lx * 0.75 + (ly * 0.045).sin() * 3.).sin()
-                    + 0.16 * (ly * 0.35 + lx * 0.1).sin())
-                .clamp(0., 1.);
-                let damage = if hash(px as i32 / 4, py as i32 / 4, 919) > 0.996 {
-                    0.75
-                } else {
-                    0.
-                };
-                let contact = ((p.pressure * (0.9 + 0.1 * (lx * 0.008 + ly * 0.005).sin()) * 1.1
-                    + local * 1.35 * 0.20
-                    - p.rough * (0.62 * grain + 0.38 * fiber)
-                    - damage)
-                    * 4.)
-                    .clamp(0., 1.);
-                let roller = 0.84
-                    + 0.12 * (px as f32 / scale * 0.025 + py as f32 / scale * 0.006).sin()
-                    + 0.06 * hash(px as i32 / 4, py as i32 / 4, self.count + 79);
+                let previous = self.pixel(x as usize, y as usize);
+                let height = self.paper_height(x as usize, y as usize);
+                let compression =
+                    1. / (1. + 1.6 * (1. + 5. * p.pressure).ln() * (0.5 + self.dwell));
+                let gap = (1. - height) * p.rough * 0.55 * compression;
+                let closure = p.pressure * 0.16 + local * 0.18;
+                let contact = smooth((closure - gap + 0.025) / 0.065);
+                // Emboss even without ink; the same topography determines ink contact.
+                let deformation = (p.pressure * (0.3 + 0.7 * contact) * 65.).round() as u8;
+                if deformation > 0 {
+                    self.pixel_mut(x as usize, y as usize).relief =
+                        previous.relief.saturating_add(deformation);
+                }
+                if local == 0. {
+                    continue;
+                }
                 let film = local * 1.35;
                 let split = (0.5 / (1. + 0.6 * p.speed + 0.15 * film)).clamp(0.15, 0.5);
                 let capacity = 0.16 * (0.4 + 0.6 * p.rough) / (0.4 + p.visc);
@@ -295,56 +407,86 @@ impl Engine {
                 // it is not a measured micrometre thickness.
                 let coverage =
                     contact * (1. - (-(film / 0.125 * (1. + p.pressure * 3.)).powi(2)).exp());
-                let mass = transferred_film(film, coverage, capacity, split) * roller.min(1.);
+                let mass = transferred_film(film, coverage, capacity, split);
                 if mass <= 0. {
                     continue;
                 }
                 if p.mode == 2 {
                     self.depletion[k] += mass / 1.35 / (self.m as f32 / COAT as f32).powi(2);
                 }
-                let previous = self.pixel(x as usize, y as usize);
-                self.pixel_mut(x as usize, y as usize).relief = previous
-                    .relief
-                    .saturating_add((p.pressure * 89.).round() as u8);
                 let excess = (local - 0.65).max(0.);
-                let spread = (excess * p.pressure * (1. - p.visc) * 5.).min(7.) * scale;
-                // Deterministic stochastic transport: each 8K cell sends its pigment to a
-                // sampled destination. No convolution buffers or fictitious extra ink.
-                let angle = hash(px as i32, py as i32, 173) * std::f32::consts::TAU;
-                let radius = hash(px as i32, py as i32, 174).sqrt() * spread;
-                let dx = (angle.cos() * radius).round() as i32;
-                let dy = (angle.sin() * radius).round() as i32;
-                let bleed = (mass * (1. - p.visc) * p.rough * 0.12).clamp(0., 0.12);
-                let edge = self.mask(px as i32 - 1, py as i32) == 0.
-                    || self.mask(px as i32 + 1, py as i32) == 0.
-                    || self.mask(px as i32, py as i32 - 1) == 0.
-                    || self.mask(px as i32, py as i32 + 1) == 0.;
-                let flick = if edge
-                    && excess > 0.
-                    && hash(px as i32, py as i32, self.count + 213)
-                        < excess.min(1.) * p.speed * 0.035
-                {
-                    0.10 * p.speed
+                let left = self.mask(px as i32 - 1, py as i32) == 0.;
+                let right = self.mask(px as i32 + 1, py as i32) == 0.;
+                let top = self.mask(px as i32, py as i32 - 1) == 0.;
+                let bottom = self.mask(px as i32, py as i32 + 1) == 0.;
+                let edge = left || right || top || bottom;
+                let ex = (right as i32 - left as i32) as f32;
+                let ey = (bottom as i32 - top as i32) as f32;
+                let normal = (ex * ex + ey * ey).sqrt().max(1.);
+                let angle = if edge { ey.atan2(ex) } else { 0. };
+                let radius = if edge {
+                    (excess * p.pressure * (1. - p.visc) * 5.).min(7.) * scale
                 } else {
                     0.
                 };
-                self.deposit(x + dx, y + dy, mass * (1. - bleed - flick), pigment);
+                let dx = (angle.cos() * radius).round() as i32;
+                let dy = (angle.sin() * radius).round() as i32;
+                let bleed = ((1. - p.visc) * p.rough * 0.08).clamp(0., 0.08);
+                // Rare satellites only in excess low-viscosity ink. Most separated ink
+                // stays in the print or in a connected, direction-dependent filament.
+                let flick = if edge
+                    && excess > 0.
+                    && hash(px as i32, py as i32, self.count + 213)
+                        < excess.min(1.) * p.speed * (1. - p.visc).powi(2) * 0.005
+                {
+                    0.03 * p.speed
+                } else {
+                    0.
+                };
+                let filament = if edge && (ex * a.cos() + ey * a.sin()) / normal > 0.2 {
+                    0.14 * self.elasticity * p.speed * film / (film + 0.15)
+                } else {
+                    0.
+                };
+                self.deposit(
+                    x + dx,
+                    y + dy,
+                    mass * (1. - bleed - flick - filament),
+                    pigment,
+                );
                 if bleed > 0. {
-                    let distance = radius + 2. * scale;
+                    let direction = hash(
+                        (x as f32 / scale) as i32,
+                        (y as f32 / scale) as i32,
+                        self.seed,
+                    ) * std::f32::consts::TAU;
+                    let distance = (0.2 + 1.2 * (1. - height)) * scale;
                     self.deposit(
-                        x + (angle.cos() * distance).round() as i32,
-                        y + (angle.sin() * distance).round() as i32,
+                        x + (direction.cos() * distance).round() as i32,
+                        y + (direction.sin() * distance).round() as i32,
                         mass * bleed,
                         pigment,
                     );
                 }
+                if filament > 0. {
+                    let length =
+                        (0.3 + 10. * self.elasticity * p.speed * (film / (film + 0.25))) * scale;
+                    for step in 1..=6 {
+                        let t = step as f32 / 6.;
+                        let bend = (height - 0.5) * scale * t * t;
+                        self.deposit(
+                            x + (a.cos() * length * t - a.sin() * bend).round() as i32,
+                            y + (a.sin() * length * t + a.cos() * bend).round() as i32,
+                            mass * filament * (7 - step) as f32 / 21.,
+                            pigment,
+                        );
+                    }
+                }
                 if flick > 0. {
-                    let distance =
-                        (5. + hash(px as i32, py as i32, self.count + 313) * excess * 22.) * scale;
-                    let side = (hash(px as i32, py as i32, 414) - 0.5) * distance;
+                    let distance = (4. + hash(px as i32, py as i32, 313) * excess * 12.) * scale;
                     self.deposit(
-                        x + (a.cos() * distance - a.sin() * side).round() as i32,
-                        y + (a.sin() * distance + a.cos() * side).round() as i32,
+                        x + (a.cos() * distance).round() as i32,
+                        y + (a.sin() * distance).round() as i32,
                         mass * flick,
                         pigment,
                     );
@@ -387,7 +529,8 @@ impl Engine {
         let p = self.pixel(x, y);
         let left = self.pixel(x.saturating_sub(1), y).relief as f32;
         let above = self.pixel(x, y.saturating_sub(1)).relief as f32;
-        let shade = (1. - 0.026 * hash(x as i32 / 4, y as i32 / 4, self.seed)
+        let shade = (0.977
+            + 0.025 * self.paper_height(x, y)
             + 0.12 * (left + above - 2. * p.relief as f32) / 255.)
             .clamp(0.85, 1.08);
         let mut rgb = [0.; 3];
@@ -483,19 +626,44 @@ impl Engine {
                 let px = (x as f32 / (COAT - 1) as f32 * (self.m - 1) as f32).round() as i32;
                 let py = (y as f32 / (COAT - 1) as f32 * (self.m - 1) as f32).round() as i32;
                 let (load, pigment, _) = self.coating(px, py, p);
-                let bare = if self.mask(px, py) > 0. { 98. } else { 188. };
-                let opacity = 1. - (-load * 1.5).exp();
+                let covered = self.surface[y * COAT + x];
+                let opacity = (1. - (-load * 1.5).exp()) * covered;
+                let bare = 188. - 90. * covered;
                 let k = (y * COAT + COAT - 1 - x) * 4;
                 for c in 0..3 {
-                    self.plate[k + c] = ((bare + hash(x as i32, y as i32, 919) * 9.)
-                        * (1. - opacity)
-                        + 255. * (-pigment[c] * 0.9).exp() * opacity)
-                        as u8;
+                    self.plate[k + c] =
+                        (bare * (1. - opacity) + 255. * (-pigment[c] * 0.9).exp() * opacity) as u8;
                 }
                 self.plate[k + 3] = 255;
             }
         }
     }
+}
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0., 1.);
+    t * t * (3. - 2. * t)
+}
+fn noise(x: f32, y: f32, seed: u32) -> f32 {
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    let tx = smooth(x - ix as f32);
+    let ty = smooth(y - iy as f32);
+    (hash(ix, iy, seed) * (1. - tx) + hash(ix + 1, iy, seed) * tx) * (1. - ty)
+        + (hash(ix, iy + 1, seed) * (1. - tx) + hash(ix + 1, iy + 1, seed) * tx) * ty
+}
+fn paper_heights(seed: u32) -> Vec<f32> {
+    let mut result = vec![0.; COAT * COAT];
+    for y in 0..COAT {
+        for x in 0..COAT {
+            let u = x as f32 * 640. / COAT as f32;
+            let v = y as f32 * 640. / COAT as f32;
+            result[y * COAT + x] = (0.30 * noise(u / 18., v / 18., seed)
+                + 0.45 * noise(u / 2.5, v / 14., seed + 19)
+                + 0.25 * noise(u / 1.6, v / 1.6, seed + 41))
+            .clamp(0., 1.);
+        }
+    }
+    result
 }
 fn absorption(rgb: u32) -> [f32; 3] {
     [rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255].map(|c| -(c as f32 / 255.).max(0.04).ln())
@@ -604,6 +772,31 @@ pub extern "C" fn update_plate(mode: u32, amount: f32, end: f32, angle: f32, rgb
     }
 }
 #[no_mangle]
+pub extern "C" fn refresh_plate() {
+    unsafe {
+        engine().refresh_surface();
+    }
+}
+#[no_mangle]
+pub extern "C" fn roller_load(width: f32, amount: f32, erase: u32, rgb: u32) {
+    unsafe {
+        engine().roller_load(width, amount, erase != 0, rgb);
+    }
+}
+#[no_mangle]
+pub extern "C" fn roller_move(x0: f32, y0: f32, x1: f32, y1: f32) {
+    unsafe {
+        engine().roller_move(x0, y0, x1, y1);
+    }
+}
+#[no_mangle]
+pub extern "C" fn configure_materials(elasticity: f32, dwell: f32) {
+    unsafe {
+        engine().elasticity = elasticity.clamp(0., 1.);
+        engine().dwell = dwell.clamp(0., 1.);
+    }
+}
+#[no_mangle]
 pub extern "C" fn print_begin(
     pressure: f32,
     rough: f32,
@@ -696,6 +889,112 @@ mod tests {
             .flat_map(|p| p.wet)
             .map(|v| v as f32 / OD_SCALE)
             .sum()
+    }
+    #[test]
+    fn roller_is_finite_conservative_and_stationary_does_not_spray() {
+        let mut e = Engine::new(256);
+        e.source.fill(0);
+        e.binary = true;
+        e.refresh_surface();
+        e.roller_load(64., 0.8, false, 0xbc3d32);
+        let before = e.roller_film.iter().sum::<f32>() * 64.;
+        e.roller_move(80., 80., 80., 80.);
+        assert_eq!(e.coat.iter().sum::<f32>(), 0.);
+        e.roller_move(80., 80., 380., 80.);
+        let on_plate = e.coat.iter().sum::<f32>();
+        let remaining = e.roller_film.iter().sum::<f32>() * 64.;
+        assert!(on_plate > 0. && remaining < before);
+        assert!((on_plate + remaining - before).abs() < 0.02);
+        e.roller_load(64., 0.8, true, 0xbc3d32);
+        e.roller_move(80., 80., 380., 80.);
+        assert!(e.coat.iter().sum::<f32>() < on_plate);
+        e.source.fill(255);
+        e.refresh_surface();
+        e.clear_ink();
+        e.roller_load(64., 0.8, false, 0xbc3d32);
+        e.roller_move(80., 80., 380., 80.);
+        assert_eq!(e.coat.iter().sum::<f32>(), 0.);
+    }
+    #[test]
+    fn contact_changes_with_pressure_and_uninked_plate_embosses() {
+        let make = || {
+            let mut e = Engine::new(256);
+            e.source.fill(0);
+            e.binary = true;
+            e
+        };
+        let mut low = make();
+        low.begin(Params {
+            pressure: 0.1,
+            rough: 0.95,
+            amount: 0.02,
+            rgb: 0x222222,
+            ..Params::default()
+        });
+        low.rows(0, low.m);
+        low.finish();
+        let mut high = make();
+        high.begin(Params {
+            pressure: 0.9,
+            rough: 0.95,
+            amount: 0.02,
+            rgb: 0x222222,
+            ..Params::default()
+        });
+        high.rows(0, high.m);
+        high.finish();
+        assert!(total(&high) > total(&low));
+        let mut blind = make();
+        blind.begin(Params {
+            pressure: 0.7,
+            rough: 0.5,
+            ..Params::default()
+        });
+        blind.rows(0, blind.m);
+        blind.finish();
+        assert_eq!(total(&blind), 0.);
+        assert!(blind
+            .tiles
+            .iter()
+            .flatten()
+            .any(|t| t.iter().any(|p| p.relief > 0)));
+    }
+    #[test]
+    fn peeling_elasticity_leaves_directional_filaments() {
+        let make = |elasticity| {
+            let mut e = Engine::new(256);
+            e.binary = true;
+            e.elasticity = elasticity;
+            for y in 60..140 {
+                for x in 40..80 {
+                    e.source[y * e.m + x] = 0;
+                }
+            }
+            e.begin(Params {
+                pressure: 0.9,
+                rough: 0.,
+                speed: 1.,
+                visc: 0.65,
+                amount: 0.6,
+                rgb: 0x222222,
+                ..Params::default()
+            });
+            e.rows(0, e.m);
+            e.finish();
+            e
+        };
+        let smooth = make(0.);
+        let elastic = make(1.);
+        let outside = |e: &Engine| {
+            let mut sum = 0.;
+            for y in 60..140 {
+                for x in 80..90 {
+                    sum += e.pixel(x + e.border, y + e.border).wet[0] as f32;
+                }
+            }
+            sum
+        };
+        assert!(outside(&elastic) > outside(&smooth));
     }
     #[test]
     fn transfer_is_bounded_and_has_finite_acceptance() {
