@@ -3,7 +3,7 @@ import { resizeCorner, smoothRollerAngle } from "../../public/wasm/composition-t
 import { glyphPixels, tightGlyphLayout } from "./glyph-tools.js";
 import { fontInfo } from "./font-catalog.js";
 import { initFontPicker } from "./font-picker.js";
-export function initLab(root, engine) {
+export function initLab(root, engine, { sample = false } = {}) {
   const abort=new AbortController(),$=id=>root.querySelector("#"+id);
   const N=640,M=512,plate=$("plate"),inkPlate=$("inkPlate"),paper=$("paper"),ctx=paper.getContext("2d");
   const assemblies=[{id:1,name:"版1",blocks:[],selectedId:null,mask:null}],references=new Set();
@@ -11,17 +11,54 @@ export function initLab(root, engine) {
   const clamp=(v,lo=0,hi=1)=>Math.max(lo,Math.min(hi,v)),val=id=>Number($(id).value),rgb=()=>parseInt($("color").value.slice(1),16);
   const mode=()=>2,selected=()=>blocks.find(b=>b.id===selectedId),imageBlock=()=>blocks.find(b=>b.type==="image");
   const status=text=>{if(!abort.signal.aborted)$("status").textContent=text;};
-  const notice=text=>{if(!abort.signal.aborted){$("plateStatus").textContent=text;status(text);}};
+  const notice=status;
   const failure=error=>notice("処理に失敗しました。"+(error.message??error));
   const listen=(element,event,callback)=>element.addEventListener(event,e=>{if(abort.signal.aborted)return;try{Promise.resolve(callback(e)).catch(error=>{if(!abort.signal.aborted)failure(error);});}catch(error){failure(error);}},{signal:abort.signal});
   let previewFrame=0,cursor=null,rolling=false,drag=null,compositionDirty=true,previous=null,paintFrame=0,paintFlush=null;
   const paintSegments=[];
+  const tabs = [...root.querySelectorAll("[role=tab][data-stage]")];
+  function switchStage(stage, focusHeading = false) {
+    for (const tab of tabs) {
+      const active = tab.dataset.stage === stage;
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+      $(tab.getAttribute("aria-controls")).hidden = !active;
+    }
+    $("workspaceStart").scrollIntoView({ block: "start" });
+    if (focusHeading) $(stage + "-title").focus({ preventScroll: true });
+    if (stage === "plate") status("「" + active.name + "」の台座を組みます。");
+    if (stage === "ink") status(blocks.length ? "版の上でローラーを動かして、インクを載せます。" : "先に版を作ってください。");
+    if (stage === "print") status(count ? count + "回刷った紙です。重ね刷りやPNG保存ができます。" : blocks.length ? "最初の刷りを始められます。" : "先に版を作ってください。");
+    schedulePreview();
+  }
+  for (const [index, tab] of tabs.entries()) {
+    listen(tab, "click", () => switchStage(tab.dataset.stage));
+    listen(tab, "keydown", event => {
+      const next = { ArrowLeft: (index + tabs.length - 1) % tabs.length,
+        ArrowRight: (index + 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      switchStage(tabs[next].dataset.stage);
+      tabs[next].focus({ preventScroll: true });
+    });
+  }
+  root.querySelectorAll("[data-go-stage]").forEach(button => {
+    listen(button, "click", () => switchStage(button.dataset.goStage, true));
+  });
+
   function controls() {
     root.querySelectorAll("input,select,textarea,button").forEach(e=>{e.disabled=busy;});
     for(const id of ["blockSize","blockLocked","removeBlock"])$(id).disabled=busy||!selected();
     $("blockSize").disabled=busy||!selected()||selected().locked;
     for(const id of ["glyphFont","glyphFontBrowse","glyphLeft","glyphRight","glyphTop","glyphBottom"])$(id).disabled=busy||selected()?.type!=="glyph"||selected()?.locked;
-    $("print").disabled=busy||!blocks.length;
+    const blankPlate = blocks.length === 0;
+    root.dataset.hasWork = String(count > 0 || assemblies.length > 1 || assemblies.some(assembly => assembly.blocks.length > 0 || assembly.name !== "版1"));
+    for (const id of ["print", "toInk", "toPrint"]) $(id).disabled = busy || blankPlate;
+    for (const id of ["blankInkGuide", "blankPrintGuide", "blankPlateGuide"]) $(id).hidden = !blankPlate;
+    $("sampleInImage").hidden = blankPlate;
+    for (const id of ["download", "exportBackground"]) $(id).disabled = busy || count === 0;
+    $("saveHint").hidden = count > 0;
+    $("showRegistration").disabled = busy || blankPlate;
     $("removeAssembly").disabled=busy||assemblies.length===1;
     $("newAssembly").disabled=busy||assemblies.length>=8;
   }
@@ -41,11 +78,19 @@ export function initLab(root, engine) {
     }
     if(assemblies.length===1)list.textContent="別の版を作ると選べます。";
     const b=imageBlock();if(b){$("plateMode").value=b.kind;$("separation").value=b.separation;$("threshold").value=b.threshold;$("screen").value=b.screen;$("tone").value=b.tone;$("invert").checked=b.invert;}
+    syncImageFields();
     syncSelection();
+  }
+  function syncImageFields() {
+    const kind = $("plateMode").value;
+    $("threshold").closest("label").hidden = kind !== "binary";
+    $("screen").closest("label").hidden = kind !== "halftone";
+    $("tone").closest("label").hidden = kind === "binary";
   }
   function syncSelection() {
     fillSelect($("blockList"),blocks,selectedId);const b=selected();
     $("glyphControls").hidden=b?.type!=="glyph";
+    $("selectionDetails").hidden=blocks.length===0;
     if(b){$("blockSize").min=b.type==="glyph"?1:8;$("blockSize").value=Math.round(b.w);$("blockLocked").checked=!!b.locked;if(b.type==="glyph"){$("glyphFont").value=b.fontChoice;for(const side of ["Left","Right","Top","Bottom"]){const field=$("glyph"+side),value=Math.round(b.padding[side.toLowerCase()]);field.max=Math.max(32,value);field.value=value;}}}
     active.selectedId=selectedId;outputs();controls();if(b?.type==="glyph")fontPicker?.preview("glyphFont");
   }
@@ -73,7 +118,31 @@ export function initLab(root, engine) {
   }
   function drawInk(){if(abort.signal.aborted)return;const c=inkPlate.getContext("2d");c.fillStyle="#ada79a";c.fillRect(0,0,N,N);if(plateImage)c.putImageData(plateImage,64,64);}
   function drawCursor(){const el=$("inkCursor");el.hidden=!cursor||busy;if(!cursor)return;el.style.left=(64+M-cursor.x)/N*100+"%";el.style.top=(64+cursor.y)/N*100+"%";el.style.width=8/N*100+"%";el.style.height=val("brushSize")/N*100+"%";el.style.transform="translate(-50%, -50%) rotate("+(-cursor.angle)+"rad)";el.classList.toggle("wiping",$("eraseInk").checked);}
-  function schedulePreview(){if(previewFrame)return;previewFrame=requestAnimationFrame(()=>{previewFrame=0;drawPlate();drawCursor();});}
+  let registrationMask, registrationImage;
+  function drawRegistration() {
+    const guide = $("registration");
+    guide.hidden = !$("showRegistration").checked || blocks.length === 0;
+    if (guide.hidden || $("print-stage").hidden) return;
+    const mask = maskOf(active);
+    if (mask !== registrationMask) {
+      const pixels = new Uint8ClampedArray(M * M * 4);
+      for (let i = 0; i < mask.length; i++) {
+        if (mask[i] !== 0) continue;
+        const k = i * 4;
+        pixels[k] = 23;
+        pixels[k + 1] = 103;
+        pixels[k + 2] = 160;
+        pixels[k + 3] = 110;
+      }
+      registrationMask = mask;
+      registrationImage = new ImageData(pixels, M, M);
+    }
+    const context = guide.getContext("2d");
+    context.clearRect(0, 0, N, N);
+    context.putImageData(registrationImage, 64 + val("offsetX"), 64 + val("offsetY"));
+  }
+  function schedulePreview(){if(previewFrame)return;previewFrame=requestAnimationFrame(()=>{previewFrame=0;drawPlate();drawCursor();drawRegistration();});}
+  for (const id of ["offsetX", "offsetY", "showRegistration"]) listen($(id), "input", schedulePreview);
   let plateDirty=false,plateUpdating=false;
   async function showPlate(){plateDirty=true;if(plateUpdating)return;plateUpdating=true;try{while(plateDirty&&!abort.signal.aborted){plateDirty=false;const bytes=await engine.call("plate",[2,val("ink")/100,0,0,rgb()]);if(!abort.signal.aborted){plateImage=new ImageData(bytes,M,M);drawInk();schedulePreview();}}}finally{plateUpdating=false;}}
   async function rebuild(restore=false) {
@@ -100,7 +169,37 @@ export function initLab(root, engine) {
     const b={...rect,...settings,id:old?.id??nextId++,name,rgba,iw,ih,type:"image",locked:old?.locked??false};if(old)blocks.splice(blocks.indexOf(old),1,b);else blocks.push(b);selectedId=b.id;return true;
   }
   listen($("upload"),"change",event=>action(async()=>{const file=event.target.files[0];if(!file)return;if(file.size>20*1024*1024)throw new Error("画像は20MB以下で選んでください。");const url=URL.createObjectURL(file),image=new Image();try{image.src=url;await image.decode();if(abort.signal.aborted)return;const scale=Math.min(1,2048/Math.max(image.width,image.height)),canvas=document.createElement("canvas");canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));const c=canvas.getContext("2d",{willReadFrequently:true});c.fillStyle="white";c.fillRect(0,0,canvas.width,canvas.height);c.drawImage(image,0,0,canvas.width,canvas.height);const added=fitImage(c.getImageData(0,0,canvas.width,canvas.height).data,canvas.width,canvas.height,file.name);canvas.width=canvas.height=1;syncAssemblies();if(added)await rebuild();}finally{URL.revokeObjectURL(url);$("upload").value="";}}));
-  listen($("sample"),"click",()=>action(async()=>{const canvas=document.createElement("canvas");canvas.width=1024;canvas.height=640;const c=canvas.getContext("2d");c.fillStyle="white";c.fillRect(0,0,1024,640);c.fillStyle="black";c.strokeStyle="black";c.lineWidth=6;c.strokeRect(25,25,974,590);c.font="bold 190px serif";c.textAlign="center";c.fillText("活版",512,280);c.font="bold 98px serif";c.fillText("実験室",512,425);c.font="32px serif";c.fillText("INK · PAPER · PRESS",512,530);if(fitImage(c.getImageData(0,0,1024,640).data,1024,640,"サンプル画像",{...imageSettings(),kind:"binary"})){syncAssemblies();await rebuild();}}));
+  async function addSample() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1024;
+    canvas.height = 640;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "white";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "black";
+    context.strokeStyle = "black";
+    context.lineWidth = 9;
+    context.strokeRect(34, 34, 956, 572);
+    context.textAlign = "center";
+    context.font = "bold 218px serif";
+    context.fillText("活版", 512, 285);
+    context.font = "bold 112px serif";
+    context.fillText("実験室", 512, 430);
+    context.font = "40px serif";
+    context.fillText("INK · PAPER · PRESS", 512, 540);
+    const empty = blocks.length === 0;
+    if (!fitImage(context.getImageData(0, 0, canvas.width, canvas.height).data,
+      canvas.width, canvas.height, "見本の版", { ...imageSettings(), kind: "binary" })) return;
+    if (empty) {
+      const block = selected();
+      block.x = snapValue((M - block.w) / 2, val("snap"));
+      block.y = snapValue((M - block.h) / 2, val("snap"));
+    }
+    syncAssemblies();
+    await rebuild();
+    notice("見本の版を置きました。「インクを塗る」へ進めます。");
+  }
+  for (const id of ["sample", "sampleInImage"]) listen($(id), "click", () => action(addSample));
   const fontStyles=[],fontLoads=new Map();let fontNumber=0;
   async function textFamily(text,choice) {
     const info=fontInfo(choice);if(info.css)return info.css;
@@ -129,7 +228,7 @@ export function initLab(root, engine) {
   }));
   listen($("blockList"),"change",()=>{selectedId=val("blockList");syncSelection();compositionDirty=true;schedulePreview();});
   listen($("removeBlock"),"click",()=>action(async()=>{const i=blocks.findIndex(b=>b.id===selectedId);if(i>=0)blocks.splice(i,1);selectedId=blocks.at(-1)?.id??null;syncSelection();await rebuild();}));
-  for(const id of ["plateMode","separation","threshold","screen","tone","invert"])listen($(id),"change",()=>action(async()=>{const b=imageBlock();if(!b)return;Object.assign(b,imageSettings());await rebuild();}));
+  for(const id of ["plateMode","separation","threshold","screen","tone","invert"])listen($(id),"change",()=>action(async()=>{syncImageFields();const b=imageBlock();if(!b)return;Object.assign(b,imageSettings());await rebuild();}));
   async function editGlyph(){const b=selected();if(b?.type!=="glyph"||b.locked)return;
     const padding={left:val("glyphLeft"),right:val("glyphRight"),top:val("glyphTop"),bottom:val("glyphBottom")},choice=$("glyphFont").value,family=choice===b.fontChoice?b.family:await textFamily(b.char,choice);if(abort.signal.aborted)return;
     const pixels=glyphPixels(b.char,family,b.fontSize,padding,fontInfo(choice).weight);
@@ -161,23 +260,35 @@ export function initLab(root, engine) {
     paintFlush=(async()=>{try{while(paintSegments.length&&!abort.signal.aborted){const segments=paintSegments.splice(0);await ensureRoller();await engine.call("roller",[segments]);await showPlate();}}finally{paintFlush=null;}})();return paintFlush;
   }
   function schedulePaint(){if(!paintFrame)paintFrame=requestAnimationFrame(()=>{paintFrame=0;flushPaint().catch(failure);});}
-  listen(inkPlate,"pointerdown",e=>{if(busy)return;const p=point(e);if(!inside(p))return;inkPlate.setPointerCapture(e.pointerId);rolling=true;previous=p;cursor={...p,angle:cursor?.angle??0};schedulePreview();});
+  listen(inkPlate,"pointerdown",e=>{if(busy||!blocks.length)return;const p=point(e);if(!inside(p))return;inkPlate.setPointerCapture(e.pointerId);rolling=true;previous=p;cursor={...p,angle:cursor?.angle??0};schedulePreview();});
   listen(inkPlate,"pointermove",e=>{if(busy)return;const p=point(e);if(!inside(p)){previous=null;cursor=null;schedulePreview();return;}const angle=cursor?.angle??0;cursor={...p,angle};if(rolling&&previous){const distance=Math.hypot(p.x-previous.x,p.y-previous.y);if(distance>=2){cursor.angle=smoothRollerAngle(angle,Math.atan2(p.y-previous.y,p.x-previous.x));paintSegments.push([previous.x,previous.y,p.x,p.y]);previous=p;schedulePaint();}}else if(rolling)previous=p;schedulePreview();});
   for(const event of ["pointerup","pointercancel","lostpointercapture"])listen(inkPlate,event,()=>{rolling=false;previous=null;return flushPaint();});
   listen(inkPlate,"pointerleave",()=>{if(!rolling){cursor=null;schedulePreview();}});
-  listen(inkPlate,"keydown",e=>{if(busy||!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," "].includes(e.key))return;e.preventDefault();const step=e.shiftKey?10:2,dx=e.key==="ArrowLeft"?step:e.key==="ArrowRight"?-step:0,dy=e.key==="ArrowUp"?-step:e.key==="ArrowDown"?step:0,p=cursor??{x:256,y:256,angle:0},end={x:clamp(p.x+(dx||(!dy?12:0)),0,M-1),y:clamp(p.y+dy,0,M-1),angle:smoothRollerAngle(p.angle,Math.atan2(dy,dx||12))};cursor=end;paintSegments.push([p.x,p.y,end.x,end.y]);schedulePreview();return flushPaint();});
+  listen(inkPlate,"keydown",e=>{if(busy||!blocks.length||!["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," "].includes(e.key))return;e.preventDefault();const step=e.shiftKey?10:2,dx=e.key==="ArrowLeft"?step:e.key==="ArrowRight"?-step:0,dy=e.key==="ArrowUp"?-step:e.key==="ArrowDown"?step:0,p=cursor??{x:256,y:256,angle:0},end={x:clamp(p.x+(dx||(!dy?12:0)),0,M-1),y:clamp(p.y+dy,0,M-1),angle:smoothRollerAngle(p.angle,Math.atan2(dy,dx||12))};cursor=end;paintSegments.push([p.x,p.y,end.x,end.y]);schedulePreview();return flushPaint();});
   listen($("clearInk"),"click",()=>action(async()=>{await engine.call("clear");await showPlate();notice("現在の版のインクを拭き取りました。ローラーのインクは残っています。");}));
   for(const id of ["ink","color"])listen($(id),"input",showPlate);
   root.querySelectorAll("input[type=range]").forEach(e=>listen(e,"input",outputs));
   async function newPaper(){await engine.call("new");count=0;if(abort.signal.aborted)return;$("empty").hidden=false;$("count").textContent="0回";await render();status("新しい紙をセットしました。");}
-  listen($("clear"),"click",()=>action(newPaper));
+  listen($("clear"), "click", () => {
+    if (count === 0 || window.confirm("今の刷り上がりを消して、新しい紙に交換しますか？")) return action(newPaper);
+  });
   listen($("print"),"click",()=>action(async()=>{
     const physics = ["paperCompliance", "paperMoisture", "edgeSqueeze", "dryTrapping", "wetTrapping", "dryRetention"];
     await engine.call("printPhysics", physics.map(id => val(id) / 100));
     await engine.call("materials",[val("elasticity")/100,val("dwell")/100,val("heightStrength")/100]);
     if($("dryBefore").checked)await engine.call("dry");
     paper.classList.remove("pressing");void paper.offsetWidth;paper.classList.add("pressing");
-    count=await engine.call("print",[val("pressure")/100,val("roughness")/100,val("speed")/100,val("viscosity")/100,val("ink")/100,mode(),0,0,val("direction"),val("offsetX"),val("offsetY"),rgb()],[],percent=>status("刷っています… "+percent+"%"));
+    const progress = $("printProgress");
+    progress.value = 0;
+    progress.hidden = false;
+    status("刷っています…");
+    try {
+      count = await engine.call("print", [val("pressure")/100,val("roughness")/100,val("speed")/100,val("viscosity")/100,val("ink")/100,mode(),0,0,val("direction"),val("offsetX"),val("offsetY"),rgb()], [], percent => {
+        progress.value = percent;
+      });
+    } finally {
+      progress.hidden = true;
+    }
     if(abort.signal.aborted)return;$("empty").hidden=true;$("count").textContent=count+"回";await showPlate();await render();status(count+"回目の刷り。新しく刷ったインクは湿っています。");
   }));
   listen($("download"),"click",()=>action(async()=>{
@@ -222,6 +333,6 @@ drawPicker();
 
   syncAssemblies();outputs();drawPlate();drawInk();
   busy=true;controls();
-  (async()=>{try{await engine.call("compose",[[]]);await newPaper();await showPlate();notice("文字や画像を入れて、版を組んでください。");}catch(error){if(!abort.signal.aborted)failure(error);}finally{if(!abort.signal.aborted){busy=false;controls();}}})();
+  (async()=>{try{await engine.call("compose",[[]]);await newPaper();await showPlate();if(sample)await addSample();else notice("文字や画像を入れるか、見本の版を置いてください。");}catch(error){if(!abort.signal.aborted)failure(error);}finally{if(!abort.signal.aborted){busy=false;controls();}}})();
   return()=>{abort.abort();fontPicker.dispose();fontStyles.forEach(style=>style.remove());fontLoads.clear();if(previewFrame)cancelAnimationFrame(previewFrame);if(paintFrame)cancelAnimationFrame(paintFrame);engine.dispose();assemblies.length=0;paintSegments.length=0;};
 }
