@@ -79,7 +79,7 @@ function call(method, args = [], transfer = []) {
 }
 try {
   const init = await call("initialize", ["test.wasm"]);
-  assert.equal(init.result.apiVersion,3);assert.equal(init.result.simulation, 8192); assert.equal(init.result.output, 4096);
+  assert.equal(init.result.apiVersion,4);assert.equal(init.result.simulation, 8192); assert.equal(init.result.output, 4096);
   await call("configure", [1, 150, 0]);
   const mask = new Uint8Array(M * M).fill(255);
   for (let y = M / 2 - 10; y < M / 2 + 10; y++) mask.fill(0, y * M + M / 2 - 10, y * M + M / 2 + 10);
@@ -105,6 +105,7 @@ try {
   await call("restoreCoating",[1]);
   assert.deepEqual((await call("plate",[2,.8,0,0,0xbc3d32])).result,coated);
   await call("materials", [.8,.7]);
+  await call("printPhysics", [.6,.2,.7,.9,.7,.8]);
   await call("print", [.7,.55,.4,.6,.55,2,.1,0,0,0,0,0xbc3d32]);
   const inkExport = (await call("export", [true])).result;
   assert.equal(inkExport[3],0); assert(inkExport.some((v,i)=>i%4===3&&v>0));

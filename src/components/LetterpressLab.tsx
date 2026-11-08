@@ -88,6 +88,8 @@ export default function LetterpressLab() {
             <h3>色を選ぶ</h3>
             <div className="color-picker"><label htmlFor="color">インクの色</label><canvas id="colorPalette" width="280" height="180" tabIndex={0} aria-label="色の明るさと鮮やかさ。矢印キーでも調整できます" /><label className="hue-label">色相<input disabled id="colorHue" type="range" min="0" max="360" defaultValue="5" /></label><input disabled type="color" id="color" defaultValue="#bc3d32" /><output id="colorOut">#BC3D32</output></div>
             <Range id="ink" label="ローラーに補充するインク量" value={35} />
+            <Range id="inkScattering" label="インクの隠蔽力（顔料の散乱）" value={100} min={5} max={400} />
+            <p className="hint">低いほど下色が見えます。変更後にローラーで載せたインクに適用します。</p>
           </aside><div className="canvas-area"><div className="board plate-board"><div className="ink-surface"><canvas id="inkPlate" tabIndex={0} aria-label="ローラーで版にインクを塗る" width="640" height="640" /><div id="inkCursor" aria-hidden="true" hidden /></div></div><p className="canvas-caption">鏡像の版面 · ローラーをドラッグしてインクを載せる</p></div></div>
         </section>
         <dialog id="fontDialog" aria-labelledby="fontDialogTitle">
@@ -102,6 +104,16 @@ export default function LetterpressLab() {
             <Range id="speed" label="剥がす速度" value={40} /><Range id="viscosity" label="インクの粘度" value={60} /><Range id="elasticity" label="インクの糸引き" value={55} /><Range id="heightStrength" label="インクの盛り上がりの陰影" value={60} />
             <label>剥がす方向<select disabled id="direction"><option value="0">左から右</option><option value="90">上から下</option><option value="45">左上から右下</option></select></label>
             <Range id="offsetX" label="横の位置" value={0} min={-100} max={100} /><Range id="offsetY" label="縦の位置" value={0} min={-100} max={100} />
+            <details>
+              <summary>紙・重ね刷りの実験設定</summary>
+              <Range id="paperCompliance" label="紙の沈みやすさ" value={50} />
+              <Range id="paperMoisture" label="紙の湿り具合" value={0} />
+              <Range id="edgeSqueeze" label="版の縁でのインクの広がり" value={65} />
+              <Range id="dryTrapping" label="乾いた下刷りへのインクの付きやすさ" value={92} />
+              <Range id="wetTrapping" label="湿った下刷りへのインクの付きやすさ" value={78} />
+              <Range id="dryRetention" label="乾燥後に残る表面膜厚" value={100} min={25} />
+              <p className="hint">値は実測値に対応しない相対量です。乾燥後の膜厚は色を固定したまま、次の接触と陰影に反映します。</p>
+            </details>
             <label className="check"><input disabled id="dryBefore" type="checkbox" defaultChecked /> 紙のインクを乾かしてから次を刷る</label>
             <p className="hint">乾かすと色が重なり、湿ったまま刷ると前のインクが動き、顔料が混ざります。</p>
             <button disabled id="print" className="primary">版を押して、刷る</button>

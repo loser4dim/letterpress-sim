@@ -142,9 +142,9 @@ export function initLab(root, engine) {
   listen($("blockSize"),"change",()=>action(async()=>{const b=selected();if(!b||b.locked){syncSelection();return;}const oldWidth=b.w,minimum=b.type==="glyph"?1:8,w=Math.max(minimum,snapValue(val("blockSize"),val("snap"))),h=Math.max(minimum,Math.round(w*b.h/b.w)),rect={...b,w,h};if(canPlace(rect,blocks)){Object.assign(b,{w,h});scaleGlyph(b,oldWidth);await rebuild();}else notice("その大きさでは台座が重なるか、版面からはみ出します。");syncSelection();schedulePreview();}));
   listen($("blockLocked"),"change",()=>{const b=selected();if(!b)return;b.locked=$("blockLocked").checked;controls();compositionDirty=true;schedulePreview();});
   plate.style.cursor="grab";inkPlate.style.cursor="crosshair";
-  async function ensureRoller(){if(!rollerDirty)return;rollerDirty=false;await engine.call("rollerLoad",[val("brushSize"),val("ink")/100,$("eraseInk").checked?1:0,rgb()]);}
+  async function ensureRoller(){if(!rollerDirty)return;rollerDirty=false;await engine.call("rollerLoad",[val("brushSize"),val("ink")/100,$("eraseInk").checked?1:0,rgb(),val("inkScattering")/100]);}
   listen($("reloadRoller"),"click",()=>action(async()=>{rollerDirty=true;await ensureRoller();notice("選んだ色のインクをローラーに補充しました。");}));
-  for(const id of ["brushSize","ink","eraseInk","color"])listen($(id),"input",()=>{rollerDirty=true;schedulePreview();});
+  for(const id of ["brushSize","ink","eraseInk","color","inkScattering"])listen($(id),"input",()=>{rollerDirty=true;schedulePreview();});
   function point(event){const box=event.currentTarget.getBoundingClientRect();return{x:M-((event.clientX-box.left)/box.width*N-64),y:(event.clientY-box.top)/box.height*N-64};}
   function inside(p){return p.x>=0&&p.y>=0&&p.x<M&&p.y<M;}
   listen(plate,"pointerdown",e=>{if(busy)return;const p=point(e),current=selected();let handle=current&&!current.locked?corners(current).find(h=>Math.hypot(h.x-p.x,h.y-p.y)<11):null;
@@ -172,8 +172,10 @@ export function initLab(root, engine) {
   async function newPaper(){await engine.call("new");count=0;if(abort.signal.aborted)return;$("empty").hidden=false;$("count").textContent="0回";await render();status("新しい紙をセットしました。");}
   listen($("clear"),"click",()=>action(newPaper));
   listen($("print"),"click",()=>action(async()=>{
-    if($("dryBefore").checked)await engine.call("dry");
+    const physics = ["paperCompliance", "paperMoisture", "edgeSqueeze", "dryTrapping", "wetTrapping", "dryRetention"];
+    await engine.call("printPhysics", physics.map(id => val(id) / 100));
     await engine.call("materials",[val("elasticity")/100,val("dwell")/100,val("heightStrength")/100]);
+    if($("dryBefore").checked)await engine.call("dry");
     paper.classList.remove("pressing");void paper.offsetWidth;paper.classList.add("pressing");
     count=await engine.call("print",[val("pressure")/100,val("roughness")/100,val("speed")/100,val("viscosity")/100,val("ink")/100,mode(),0,0,val("direction"),val("offsetX"),val("offsetY"),rgb()],[],percent=>status("刷っています… "+percent+"%"));
     if(abort.signal.aborted)return;$("empty").hidden=true;$("count").textContent=count+"回";await showPlate();await render();status(count+"回目の刷り。新しく刷ったインクは湿っています。");

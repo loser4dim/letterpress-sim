@@ -38,7 +38,7 @@ export async function loadEngine(resolution = 8192): Promise<PrintEngine> {
   const dispose = () => { disposed = true; worker.terminate(); fail(new Error("処理を終了しました")); };
   try {
     const sizes = await call("initialize", [`${assets}/letterpress_engine.wasm`, resolution]) as PrintEngine["sizes"];
-    if ((sizes as PrintEngine["sizes"] & { apiVersion?: number }).apiVersion !== 3) throw new Error("画面と印刷エンジンの版が一致しません。サイトを再読み込みしてください。");
+    if ((sizes as PrintEngine["sizes"] & { apiVersion?: number }).apiVersion !== 4) throw new Error("画面と印刷エンジンの版が一致しません。サイトを再読み込みしてください。");
     return { sizes, call, dispose };
   } catch (error) { dispose(); throw error; }
 }
